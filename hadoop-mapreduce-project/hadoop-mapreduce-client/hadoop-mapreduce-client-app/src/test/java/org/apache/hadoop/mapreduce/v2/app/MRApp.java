@@ -254,7 +254,7 @@ public class MRApp extends MRAppMaster {
     // the job can reaches the final state when MRAppMaster shuts down.
     this.successfullyUnregistered.set(unregistered);
     this.assignedQueue = assignedQueue;
-    this.resource = Resource.newInstance(1234L, 2L);
+    this.resource = Resource.newInstance(1234L, 2);
   }
 
   @Override
@@ -814,20 +814,6 @@ public class MRApp extends MRAppMaster {
                 containerToken.getKind()),
             new Text(containerToken.getService()));
     return token.decodeIdentifier();
-  }
-
-  @Override
-  protected void shutdownTaskLog() {
-    // Avoid closing the logging system during unit tests,
-    // otherwise subsequent MRApp instances in the same test
-    // will fail to log anything.
-  }
-
-  @Override
-  protected void shutdownLogManager() {
-    // Avoid closing the logging system during unit tests,
-    // otherwise subsequent MRApp instances in the same test
-    // will fail to log anything.
   }
 
 }

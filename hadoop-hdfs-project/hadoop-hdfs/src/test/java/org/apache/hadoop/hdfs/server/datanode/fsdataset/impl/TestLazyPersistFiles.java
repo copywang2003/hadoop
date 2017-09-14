@@ -29,6 +29,7 @@ import java.util.EnumSet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.hadoop.fs.StorageType.RAM_DISK;
@@ -89,7 +90,7 @@ public class TestLazyPersistFiles extends LazyPersistTestCase {
    */
   @Test
   public void testCorruptFilesAreDiscarded()
-      throws IOException, InterruptedException {
+      throws IOException, InterruptedException, TimeoutException {
     getClusterBuilder().setRamDiskReplicaCapacity(2).build();
     final String METHOD_NAME = GenericTestUtils.getMethodName();
     Path path1 = new Path("/" + METHOD_NAME + ".01.dat");
@@ -103,8 +104,8 @@ public class TestLazyPersistFiles extends LazyPersistTestCase {
     Thread.sleep(30000L);
     assertThat(cluster.getNamesystem().getNumDeadDataNodes(), is(1));
 
-    // Next, wait for the replication monitor to mark the file as corrupt
-    Thread.sleep(2 * DFS_NAMENODE_REPLICATION_INTERVAL_DEFAULT * 1000);
+    // Next, wait for the redundancy monitor to mark the file as corrupt.
+    Thread.sleep(2 * DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_DEFAULT * 1000);
 
     // Wait for the LazyPersistFileScrubber to run
     Thread.sleep(2 * LAZY_WRITE_FILE_SCRUBBER_INTERVAL_SEC * 1000);
@@ -117,13 +118,13 @@ public class TestLazyPersistFiles extends LazyPersistTestCase {
     assertThat(cluster.getNameNode()
                       .getNamesystem()
                       .getBlockManager()
-                      .getUnderReplicatedBlocksCount(),
+                      .getLowRedundancyBlocksCount(),
                is(0L));
   }
 
   @Test
   public void testDisableLazyPersistFileScrubber()
-      throws IOException, InterruptedException {
+      throws IOException, InterruptedException, TimeoutException {
     getClusterBuilder().setRamDiskReplicaCapacity(2).disableScrubber().build();
     final String METHOD_NAME = GenericTestUtils.getMethodName();
     Path path1 = new Path("/" + METHOD_NAME + ".01.dat");
@@ -136,8 +137,8 @@ public class TestLazyPersistFiles extends LazyPersistTestCase {
     cluster.shutdownDataNodes();
     Thread.sleep(30000L);
 
-    // Next, wait for the replication monitor to mark the file as corrupt
-    Thread.sleep(2 * DFS_NAMENODE_REPLICATION_INTERVAL_DEFAULT * 1000);
+    // Next, wait for the redundancy monitor to mark the file as corrupt.
+    Thread.sleep(2 * DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_DEFAULT * 1000);
 
     // Wait for the LazyPersistFileScrubber to run
     Thread.sleep(2 * LAZY_WRITE_FILE_SCRUBBER_INTERVAL_SEC * 1000);
@@ -151,8 +152,8 @@ public class TestLazyPersistFiles extends LazyPersistTestCase {
   * If NN restarted then lazyPersist files should not deleted
   */
   @Test
-  public void testFileShouldNotDiscardedIfNNRestarted() throws IOException,
-      InterruptedException {
+  public void testFileShouldNotDiscardedIfNNRestarted()
+      throws IOException, InterruptedException, TimeoutException {
     getClusterBuilder().setRamDiskReplicaCapacity(2).build();
     final String METHOD_NAME = GenericTestUtils.getMethodName();
     Path path1 = new Path("/" + METHOD_NAME + ".01.dat");
@@ -163,8 +164,8 @@ public class TestLazyPersistFiles extends LazyPersistTestCase {
 
     cluster.restartNameNodes();
 
-    // wait for the replication monitor to mark the file as corrupt
-    Thread.sleep(2 * DFS_NAMENODE_REPLICATION_INTERVAL_DEFAULT * 1000);
+    // wait for the redundancy monitor to mark the file as corrupt.
+    Thread.sleep(2 * DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_DEFAULT * 1000);
 
     Long corruptBlkCount = (long) Iterators.size(cluster.getNameNode()
         .getNamesystem().getBlockManager().getCorruptReplicaBlockIterator());

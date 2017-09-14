@@ -64,6 +64,8 @@ import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
+import org.apache.hadoop.hdfs.server.protocol.SlowDiskReports;
+import org.apache.hadoop.hdfs.server.protocol.SlowPeerReports;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
@@ -95,36 +97,10 @@ import org.apache.log4j.LogManager;
  * except for the name-node. Each operation is executed
  * by calling directly the respective name-node method.
  * The name-node here is real all other components are simulated.
- * 
- * This benchmark supports
- * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/CommandsManual.html#Generic_Options">
- * standard command-line options</a>. If you use remote namenode by <tt>-fs</tt>
- * option, its config <tt>dfs.namenode.fs-limits.min-block-size</tt> should be
- * set as 16.
  *
- * Command line arguments for the benchmark include:
- * <ol>
- * <li>total number of operations to be performed,</li>
- * <li>number of threads to run these operations,</li>
- * <li>followed by operation specific input parameters.</li>
- * <li>-logLevel L specifies the logging level when the benchmark runs.
- * The default logging level is {@link Level#ERROR}.</li>
- * <li>-UGCacheRefreshCount G will cause the benchmark to call
- * {@link NameNodeRpcServer#refreshUserToGroupsMappings} after
- * every G operations, which purges the name-node's user group cache.
- * By default the refresh is never called.</li>
- * <li>-keepResults do not clean up the name-space after execution.</li>
- * <li>-useExisting do not recreate the name-space, use existing data.</li>
- * </ol>
- * 
- * The benchmark first generates inputs for each thread so that the
- * input generation overhead does not effect the resulting statistics.
- * The number of operations performed by threads is practically the same. 
- * Precisely, the difference between the number of operations 
- * performed by any two threads does not exceed 1.
- * 
- * Then the benchmark executes the specified number of operations using 
- * the specified number of threads and outputs the resulting stats.
+ * For usage, please see <a href="http://hadoop.apache.org/docs/current/hadoop-project-dist/hadoop-common/Benchmarking.html#NNThroughputBenchmark">the documentation</a>.
+ * Meanwhile, if you change the usage of this program, please also update the
+ * documentation accordingly.
  */
 public class NNThroughputBenchmark implements Tool {
   private static final Log LOG = LogFactory.getLog(NNThroughputBenchmark.class);
@@ -611,14 +587,16 @@ public class NNThroughputBenchmark implements Tool {
     throws IOException {
       long start = Time.now();
       // dummyActionNoSynch(fileIdx);
-      clientProto.create(fileNames[daemonId][inputIdx], FsPermission.getDefault(),
-                      clientName, new EnumSetWritable<CreateFlag>(EnumSet
-              .of(CreateFlag.CREATE, CreateFlag.OVERWRITE)), true, 
-          replication, BLOCK_SIZE, CryptoProtocolVersion.supported());
+      clientProto.create(fileNames[daemonId][inputIdx],
+          FsPermission.getDefault(), clientName,
+          new EnumSetWritable<CreateFlag>(EnumSet
+              .of(CreateFlag.CREATE, CreateFlag.OVERWRITE)), true,
+          replication, BLOCK_SIZE, CryptoProtocolVersion.supported(), null);
       long end = Time.now();
-      for(boolean written = !closeUponCreate; !written; 
+      for (boolean written = !closeUponCreate; !written;
         written = clientProto.complete(fileNames[daemonId][inputIdx],
-                                    clientName, null, HdfsConstants.GRANDFATHER_INODE_ID));
+            clientName, null, HdfsConstants.GRANDFATHER_INODE_ID)) {
+      };
       return end-start;
     }
 
@@ -975,9 +953,11 @@ public class NNThroughputBenchmark implements Tool {
       // register datanode
       // TODO:FEDERATION currently a single block pool is supported
       StorageReport[] rep = { new StorageReport(storage, false,
-          DF_CAPACITY, DF_USED, DF_CAPACITY - DF_USED, DF_USED) };
+          DF_CAPACITY, DF_USED, DF_CAPACITY - DF_USED, DF_USED, 0L) };
       DatanodeCommand[] cmds = dataNodeProto.sendHeartbeat(dnRegistration, rep,
-          0L, 0L, 0, 0, 0, null, true).getCommands();
+          0L, 0L, 0, 0, 0, null, true,
+          SlowPeerReports.EMPTY_REPORT, SlowDiskReports.EMPTY_REPORT)
+          .getCommands();
       if(cmds != null) {
         for (DatanodeCommand cmd : cmds ) {
           if(LOG.isDebugEnabled()) {
@@ -1024,9 +1004,11 @@ public class NNThroughputBenchmark implements Tool {
     int replicateBlocks() throws IOException {
       // register datanode
       StorageReport[] rep = { new StorageReport(storage,
-          false, DF_CAPACITY, DF_USED, DF_CAPACITY - DF_USED, DF_USED) };
+          false, DF_CAPACITY, DF_USED, DF_CAPACITY - DF_USED, DF_USED, 0) };
       DatanodeCommand[] cmds = dataNodeProto.sendHeartbeat(dnRegistration,
-          rep, 0L, 0L, 0, 0, 0, null, true).getCommands();
+          rep, 0L, 0L, 0, 0, 0, null, true,
+          SlowPeerReports.EMPTY_REPORT, SlowDiskReports.EMPTY_REPORT)
+          .getCommands();
       if (cmds != null) {
         for (DatanodeCommand cmd : cmds) {
           if (cmd.getAction() == DatanodeProtocol.DNA_TRANSFER) {
@@ -1063,7 +1045,7 @@ public class NNThroughputBenchmark implements Tool {
                   blocks[i], ReceivedDeletedBlockInfo.BlockStatus.RECEIVED_BLOCK,
                   null) };
           StorageReceivedDeletedBlocks[] report = { new StorageReceivedDeletedBlocks(
-              targetStorageID, rdBlocks) };
+              new DatanodeStorage(targetStorageID), rdBlocks) };
           dataNodeProto.blockReceivedAndDeleted(receivedDNReg, bpid, report);
         }
       }
@@ -1159,7 +1141,7 @@ public class NNThroughputBenchmark implements Tool {
         String fileName = nameGenerator.getNextFileName("ThroughputBench");
         clientProto.create(fileName, FsPermission.getDefault(), clientName,
             new EnumSetWritable<CreateFlag>(EnumSet.of(CreateFlag.CREATE, CreateFlag.OVERWRITE)), true, replication,
-            BLOCK_SIZE, CryptoProtocolVersion.supported());
+            BLOCK_SIZE, CryptoProtocolVersion.supported(), null);
         ExtendedBlock lastBlock = addBlocks(fileName, clientName);
         clientProto.complete(fileName, clientName, lastBlock, HdfsConstants.GRANDFATHER_INODE_ID);
       }
@@ -1183,7 +1165,8 @@ public class NNThroughputBenchmark implements Tool {
               loc.getBlock().getLocalBlock(),
               ReceivedDeletedBlockInfo.BlockStatus.RECEIVED_BLOCK, null) };
           StorageReceivedDeletedBlocks[] report = { new StorageReceivedDeletedBlocks(
-              datanodes[dnIdx].storage.getStorageID(), rdBlocks) };
+              new DatanodeStorage(datanodes[dnIdx].storage.getStorageID()),
+              rdBlocks) };
           dataNodeProto.blockReceivedAndDeleted(datanodes[dnIdx].dnRegistration,
               bpid, report);
         }
@@ -1262,8 +1245,8 @@ public class NNThroughputBenchmark implements Tool {
   }   // end BlockReportStats
 
   /**
-   * Measures how fast replication monitor can compute data-node work.
-   * 
+   * Measures how fast redundancy monitor can compute data-node work.
+   *
    * It runs only one thread until no more work can be scheduled.
    */
   class ReplicationStats extends OperationStatsBase {
@@ -1290,7 +1273,7 @@ public class NNThroughputBenchmark implements Tool {
       parseArguments(args);
       // number of operations is 4 times the number of decommissioned
       // blocks divided by the number of needed replications scanned 
-      // by the replication monitor in one iteration
+      // by the redundancy monitor in one iteration
       numOpsRequired = (totalBlocks*replication*nodesToDecommission*2)
             / (numDatanodes*numDatanodes);
 
@@ -1339,8 +1322,8 @@ public class NNThroughputBenchmark implements Tool {
 
       // start data-nodes; create a bunch of files; generate block reports.
       blockReportObject.generateInputs(ignore);
-      // stop replication monitor
-      BlockManagerTestUtil.stopReplicationThread(namesystem.getBlockManager());
+      // stop redundancy monitor thread.
+      BlockManagerTestUtil.stopRedundancyThread(namesystem.getBlockManager());
 
       // report blocks once
       int nrDatanodes = blockReportObject.getNumDatanodes();

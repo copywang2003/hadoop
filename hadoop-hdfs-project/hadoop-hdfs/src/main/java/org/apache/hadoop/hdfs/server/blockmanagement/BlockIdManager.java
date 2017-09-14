@@ -20,11 +20,14 @@ package org.apache.hadoop.hdfs.server.blockmanagement;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.common.GenerationStamp;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 
 import java.io.IOException;
+
+import static org.apache.hadoop.hdfs.protocol.BlockType.STRIPED;
 
 /**
  * BlockIdManager allocates the generation stamps and the block ID. The
@@ -207,9 +210,14 @@ public class BlockIdManager {
   /**
    * Increments, logs and then returns the block ID
    */
-  long nextBlockId(boolean isStriped) {
-    return isStriped ? blockGroupIdGenerator.nextValue() :
-        blockIdGenerator.nextValue();
+  long nextBlockId(BlockType blockType) {
+    switch(blockType) {
+    case CONTIGUOUS: return blockIdGenerator.nextValue();
+    case STRIPED: return blockGroupIdGenerator.nextValue();
+    default:
+      throw new IllegalArgumentException(
+          "nextBlockId called with an unsupported BlockType");
+    }
   }
 
   boolean isGenStampInFuture(Block block) {
@@ -225,11 +233,12 @@ public class BlockIdManager {
     generationStamp.setCurrentValue(GenerationStamp.LAST_RESERVED_STAMP);
     getBlockIdGenerator().setCurrentValue(SequentialBlockIdGenerator
       .LAST_RESERVED_BLOCK_ID);
+    getBlockGroupIdGenerator().setCurrentValue(Long.MIN_VALUE);
     legacyGenerationStampLimit = HdfsConstants.GRANDFATHER_GENERATION_STAMP;
   }
 
   public static boolean isStripedBlockID(long id) {
-    return id < 0;
+    return BlockType.fromBlockId(id) == STRIPED;
   }
 
   /**

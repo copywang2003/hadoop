@@ -17,13 +17,14 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
+import static org.apache.hadoop.test.PlatformAssumptions.assumeNotWindows;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assume.assumeTrue;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -38,7 +39,9 @@ import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.DiskChecker.DiskErrorException;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.Timeout;
 
 /**
  * Test the ability of a DN to tolerate volume failures.
@@ -56,6 +59,10 @@ public class TestDataNodeVolumeFailureToleration {
   // Wait at least (2 * re-check + 10 * heartbeat) seconds for
   // a datanode to be considered dead by the namenode.  
   final int WAIT_FOR_DEATH = 15000;
+
+  // specific the timeout for entire test class
+  @Rule
+  public Timeout timeout = new Timeout(120 * 1000);
 
   @Before
   public void setUp() throws Exception {
@@ -91,7 +98,7 @@ public class TestDataNodeVolumeFailureToleration {
    */
   @Test
   public void testValidVolumesAtStartup() throws Exception {
-    assumeTrue(!System.getProperty("os.name").startsWith("Windows"));
+    assumeNotWindows();
 
     // Make sure no DNs are running.
     cluster.shutdownDataNodes();
@@ -139,11 +146,13 @@ public class TestDataNodeVolumeFailureToleration {
    */
   @Test
   public void testConfigureMinValidVolumes() throws Exception {
-    assumeTrue(!System.getProperty("os.name").startsWith("Windows"));
+    assumeNotWindows();
 
     // Bring up two additional datanodes that need both of their volumes
     // functioning in order to stay up.
     conf.setInt(DFSConfigKeys.DFS_DATANODE_FAILED_VOLUMES_TOLERATED_KEY, 0);
+    conf.setTimeDuration(DFSConfigKeys.DFS_DATANODE_DISK_CHECK_MIN_GAP_KEY,
+        0, TimeUnit.MILLISECONDS);
     cluster.startDataNodes(conf, 2, true, null, null);
     cluster.waitActive();
     final DatanodeManager dm = cluster.getNamesystem().getBlockManager(
@@ -218,7 +227,7 @@ public class TestDataNodeVolumeFailureToleration {
   private void testVolumeConfig(int volumesTolerated, int volumesFailed,
       boolean expectedBPServiceState, boolean manageDfsDirs)
       throws IOException, InterruptedException {
-    assumeTrue(!System.getProperty("os.name").startsWith("Windows"));
+    assumeNotWindows();
     final int dnIndex = 0;
     // Fail the current directory since invalid storage directory perms
     // get fixed up automatically on datanode startup.
@@ -272,7 +281,7 @@ public class TestDataNodeVolumeFailureToleration {
    */
   @Test
   public void testFailedVolumeOnStartupIsCounted() throws Exception {
-    assumeTrue(!System.getProperty("os.name").startsWith("Windows"));
+    assumeNotWindows();
     final DatanodeManager dm = cluster.getNamesystem().getBlockManager(
     ).getDatanodeManager();
     long origCapacity = DFSTestUtil.getLiveDatanodeCapacity(dm);

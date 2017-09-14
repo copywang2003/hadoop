@@ -34,6 +34,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -96,7 +97,16 @@ public class FSImage implements Closeable {
   final private Configuration conf;
 
   protected NNStorageRetentionManager archivalManager;
-  private int quotaInitThreads;
+
+  /**
+   * The collection of newly added storage directories. These are partially
+   * formatted then later fully populated along with a VERSION file.
+   * For HA, the second part is done when the next checkpoint is saved.
+   * This set will be cleared once a VERSION file is created.
+   * For non-HA, a new fsimage will be locally generated along with a new
+   * VERSION file. This set is not used for non-HA mode.
+   */
+  private Set<StorageDirectory> newDirs = null;
 
   /* Used to make sure there are no concurrent checkpoints for a given txid
    * The checkpoint here could be one of the following operations.
@@ -261,9 +271,26 @@ public class FSImage implements Closeable {
         throw new IOException(StorageState.NON_EXISTENT + 
                               " state cannot be here");
       case NOT_FORMATTED:
+        // Create a dir structure, but not the VERSION file. The presence of
+        // VERSION is checked in the inspector's needToSave() method and
+        // saveNamespace is triggered if it is absent. This will bring
+        // the storage state uptodate along with a new VERSION file.
+        // If HA is enabled, NNs start up as standby so saveNamespace is not
+        // triggered.
         LOG.info("Storage directory " + sd.getRoot() + " is not formatted.");
         LOG.info("Formatting ...");
         sd.clearDirectory(); // create empty currrent dir
+        // For non-HA, no further action is needed here, as saveNamespace will
+        // take care of the rest.
+        if (!target.isHaEnabled()) {
+          continue;
+        }
+        // If HA is enabled, save the dirs to create a version file later when
+        // a checkpoint image is saved.
+        if (newDirs == null) {
+          newDirs = new HashSet<StorageDirectory>();
+        }
+        newDirs.add(sd);
         break;
       default:
         break;
@@ -289,7 +316,27 @@ public class FSImage implements Closeable {
     
     return loadFSImage(target, startOpt, recovery);
   }
-  
+
+  /**
+   * Create a VERSION file in the newly added storage directories.
+   */
+  private void initNewDirs() {
+    if (newDirs == null) {
+      return;
+    }
+    for (StorageDirectory sd : newDirs) {
+      try {
+        storage.writeProperties(sd);
+        LOG.info("Wrote VERSION in the new storage, " + sd.getCurrentDir());
+      } catch (IOException e) {
+        // Failed to create a VERSION file. Report the error.
+        storage.reportErrorOnFile(sd.getVersionFile());
+      }
+    }
+    newDirs.clear();
+    newDirs = null;
+  }
+
   /**
    * For each storage directory, performs recovery of incomplete transitions
    * (eg. upgrade, rollback, checkpoint) and inserts the directory's storage
@@ -539,7 +586,7 @@ public class FSImage implements Closeable {
 
     // and save it but keep the same checkpointTime
     saveNamespace(target);
-    getStorage().writeAll();
+    updateStorageVersion();
   }
   
   void finalizeUpgrade(boolean finalizeEditLog) throws IOException {
@@ -665,7 +712,6 @@ public class FSImage implements Closeable {
       LOG.info("No edit log streams selected.");
     }
     
-    Exception le = null;
     FSImageFile imageFile = null;
     for (int i = 0; i < imageFiles.size(); i++) {
       try {
@@ -676,7 +722,6 @@ public class FSImage implements Closeable {
         throw new IOException("Failed to load image from " + imageFile,
             ie);
       } catch (Exception e) {
-        le = e;
         LOG.error("Failed to load image from " + imageFile, e);
         target.clear();
         imageFile = null;
@@ -798,9 +843,9 @@ public class FSImage implements Closeable {
    */
   private boolean needsResaveBasedOnStaleCheckpoint(
       File imageFile, long numEditsLoaded) {
-    final long checkpointPeriod = conf.getLong(
-        DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_KEY, 
-        DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_DEFAULT);
+    final long checkpointPeriod = conf.getTimeDuration(
+        DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_KEY,
+        DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_DEFAULT, TimeUnit.SECONDS);
     final long checkpointTxnCount = conf.getLong(
         DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_KEY,
         DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_TXNS_DEFAULT);
@@ -923,7 +968,7 @@ public class FSImage implements Closeable {
       Canceler canceler) throws IOException {
     FSImageCompression compression =
         FSImageCompression.createCompression(conf);
-    long txid = getLastAppliedOrWrittenTxId();
+    long txid = getCorrectLastAppliedOrWrittenTxId();
     SaveNamespaceContext ctx = new SaveNamespaceContext(source, txid,
         canceler);
     FSImageFormat.Saver saver = new FSImageFormat.Saver(ctx);
@@ -1018,7 +1063,7 @@ public class FSImage implements Closeable {
       final long checkpointTxId = image.getCheckpointTxId();
       final long checkpointAge = Time.now() - imageFile.lastModified();
       if (checkpointAge <= timeWindow * 1000 &&
-          checkpointTxId >= this.getLastAppliedOrWrittenTxId() - txGap) {
+          checkpointTxId >= this.getCorrectLastAppliedOrWrittenTxId() - txGap) {
         return false;
       }
     }
@@ -1045,7 +1090,7 @@ public class FSImage implements Closeable {
     if (editLogWasOpen) {
       editLog.endCurrentLogSegment(true);
     }
-    long imageTxId = getLastAppliedOrWrittenTxId();
+    long imageTxId = getCorrectLastAppliedOrWrittenTxId();
     if (!addToCheckpointing(imageTxId)) {
       throw new IOException(
           "FS image is being downloaded from another NN at txid " + imageTxId);
@@ -1054,7 +1099,7 @@ public class FSImage implements Closeable {
       try {
         saveFSImageInAllDirs(source, nnf, imageTxId, canceler);
         if (!source.isRollingUpgrade()) {
-          storage.writeAll();
+          updateStorageVersion();
         }
       } finally {
         if (editLogWasOpen) {
@@ -1352,6 +1397,9 @@ public class FSImage implements Closeable {
     if (txid > storage.getMostRecentCheckpointTxId()) {
       storage.setMostRecentCheckpointInfo(txid, Time.now());
     }
+
+    // Create a version file in any new storage directory.
+    initNewDirs();
   }
 
   @Override
@@ -1416,6 +1464,15 @@ public class FSImage implements Closeable {
   }
 
   public long getLastAppliedOrWrittenTxId() {
+    return Math.max(lastAppliedTxId,
+        editLog != null ? editLog.getLastWrittenTxIdWithoutLock() : 0);
+  }
+
+  /**
+   * This method holds a lock of FSEditLog to get the correct value.
+   * This method must not be used for metrics.
+   */
+  public long getCorrectLastAppliedOrWrittenTxId() {
     return Math.max(lastAppliedTxId,
         editLog != null ? editLog.getLastWrittenTxId() : 0);
   }

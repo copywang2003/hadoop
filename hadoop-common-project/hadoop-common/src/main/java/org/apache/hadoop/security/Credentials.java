@@ -29,15 +29,13 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.commons.io.Charsets;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -52,15 +50,17 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.security.proto.SecurityProtos.CredentialsKVProto;
 import org.apache.hadoop.security.proto.SecurityProtos.CredentialsProto;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A class that provides the facilities of reading and writing
  * secret keys and Tokens.
  */
-@InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce"})
+@InterfaceAudience.Public
 @InterfaceStability.Evolving
 public class Credentials implements Writable {
-  private static final Log LOG = LogFactory.getLog(Credentials.class);
+  private static final Logger LOG = LoggerFactory.getLogger(Credentials.class);
 
   private  Map<Text, byte[]> secretKeysMap = new HashMap<Text, byte[]>();
   private  Map<Text, Token<? extends TokenIdentifier>> tokenMap =
@@ -95,10 +95,20 @@ public class Credentials implements Writable {
    * @param t the token object
    */
   public void addToken(Text alias, Token<? extends TokenIdentifier> t) {
-    if (t != null) {
-      tokenMap.put(alias, t);
-    } else {
+    if (t == null) {
       LOG.warn("Null token ignored for " + alias);
+    } else if (tokenMap.put(alias, t) != null) {
+      // Update private tokens
+      Map<Text, Token<? extends TokenIdentifier>> tokensToAdd =
+          new HashMap<>();
+      for (Map.Entry<Text, Token<? extends TokenIdentifier>> e :
+          tokenMap.entrySet()) {
+        Token<? extends TokenIdentifier> token = e.getValue();
+        if (token.isPrivateCloneOf(alias)) {
+          tokensToAdd.put(e.getKey(), t.privateClone(token.getService()));
+        }
+      }
+      tokenMap.putAll(tokensToAdd);
     }
   }
 
@@ -178,7 +188,7 @@ public class Credentials implements Writable {
     } catch(IOException ioe) {
       throw new IOException("Exception reading " + filename, ioe);
     } finally {
-      IOUtils.cleanup(LOG, in);
+      IOUtils.cleanupWithLogger(LOG, in);
     }
   }
 
@@ -201,7 +211,7 @@ public class Credentials implements Writable {
     } catch(IOException ioe) {
       throw new IOException("Exception reading " + filename, ioe);
     } finally {
-      IOUtils.cleanup(LOG, in);
+      IOUtils.cleanupWithLogger(LOG, in);
     }
   }
 
@@ -228,7 +238,7 @@ public class Credentials implements Writable {
   }
 
   private static final byte[] TOKEN_STORAGE_MAGIC =
-      "HDTS".getBytes(Charsets.UTF_8);
+      "HDTS".getBytes(StandardCharsets.UTF_8);
   private static final byte TOKEN_STORAGE_VERSION = 1;
 
   /**
@@ -397,7 +407,7 @@ public class Credentials implements Writable {
     for(Map.Entry<Text, Token<?>> token: other.tokenMap.entrySet()){
       Text key = token.getKey();
       if (!tokenMap.containsKey(key) || overwrite) {
-        tokenMap.put(key, token.getValue());
+        addToken(key, token.getValue());
       }
     }
   }

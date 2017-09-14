@@ -21,11 +21,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.InetSocketAddress;
-import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
 
-import org.apache.commons.io.Charsets;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
@@ -168,7 +166,7 @@ public class TraceAdmin extends Configured implements Tool {
       System.err.println("You must specify a host with -host.");
       return 1;
     }
-    if (args.size() < 0) {
+    if (args.isEmpty()) {
       System.err.println("You must specify an operation.");
       return 1;
     }

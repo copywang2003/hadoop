@@ -21,18 +21,25 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.Map;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.mapreduce.filecache.ClientDistributedCacheManager;
 import org.apache.hadoop.mapreduce.filecache.DistributedCache;
+
+import com.google.common.annotations.VisibleForTesting;
 
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
@@ -54,7 +61,7 @@ class JobResourceUploader {
    * @param submitJobDir the submission directory of the job
    * @throws IOException
    */
-  public void uploadFiles(Job job, Path submitJobDir) throws IOException {
+  public void uploadResources(Job job, Path submitJobDir) throws IOException {
     Configuration conf = job.getConfiguration();
     short replication =
         (short) conf.getInt(Job.SUBMIT_REPLICATION,
@@ -65,12 +72,6 @@ class JobResourceUploader {
           + "Implement the Tool interface and execute your application "
           + "with ToolRunner to remedy this.");
     }
-
-    // get all the command line arguments passed in by the user conf
-    String files = conf.get("tmpfiles");
-    String libjars = conf.get("tmpjars");
-    String archives = conf.get("tmparchives");
-    String jobJar = job.getJar();
 
     //
     // Figure out what fs the JobTracker is using. Copy the
@@ -91,78 +92,152 @@ class JobResourceUploader {
     submitJobDir = new Path(submitJobDir.toUri().getPath());
     FsPermission mapredSysPerms =
         new FsPermission(JobSubmissionFiles.JOB_DIR_PERMISSION);
-    FileSystem.mkdirs(jtFs, submitJobDir, mapredSysPerms);
-    Path filesDir = JobSubmissionFiles.getJobDistCacheFiles(submitJobDir);
-    Path archivesDir = JobSubmissionFiles.getJobDistCacheArchives(submitJobDir);
-    Path libjarsDir = JobSubmissionFiles.getJobDistCacheLibjars(submitJobDir);
-    // add all the command line files/ jars and archive
-    // first copy them to jobtrackers filesystem
+    mkdirs(jtFs, submitJobDir, mapredSysPerms);
 
-    if (files != null) {
-      FileSystem.mkdirs(jtFs, filesDir, mapredSysPerms);
-      String[] fileArr = files.split(",");
-      for (String tmpFile : fileArr) {
+    Collection<String> files = conf.getStringCollection("tmpfiles");
+    Collection<String> libjars = conf.getStringCollection("tmpjars");
+    Collection<String> archives = conf.getStringCollection("tmparchives");
+    String jobJar = job.getJar();
+
+    Map<URI, FileStatus> statCache = new HashMap<URI, FileStatus>();
+    checkLocalizationLimits(conf, files, libjars, archives, jobJar, statCache);
+
+    uploadFiles(conf, files, submitJobDir, mapredSysPerms, replication);
+    uploadLibJars(conf, libjars, submitJobDir, mapredSysPerms, replication);
+    uploadArchives(conf, archives, submitJobDir, mapredSysPerms, replication);
+    uploadJobJar(job, jobJar, submitJobDir, replication);
+    addLog4jToDistributedCache(job, submitJobDir);
+
+    // set the timestamps of the archives and files
+    // set the public/private visibility of the archives and files
+    ClientDistributedCacheManager.determineTimestampsAndCacheVisibilities(conf,
+        statCache);
+    // get DelegationToken for cached file
+    ClientDistributedCacheManager.getDelegationTokens(conf,
+        job.getCredentials());
+  }
+
+  @VisibleForTesting
+  void uploadFiles(Configuration conf, Collection<String> files,
+      Path submitJobDir, FsPermission mapredSysPerms, short submitReplication)
+      throws IOException {
+    Path filesDir = JobSubmissionFiles.getJobDistCacheFiles(submitJobDir);
+    if (!files.isEmpty()) {
+      mkdirs(jtFs, filesDir, mapredSysPerms);
+      for (String tmpFile : files) {
         URI tmpURI = null;
         try {
           tmpURI = new URI(tmpFile);
         } catch (URISyntaxException e) {
-          throw new IllegalArgumentException(e);
+          throw new IllegalArgumentException("Error parsing files argument."
+              + " Argument must be a valid URI: " + tmpFile, e);
         }
         Path tmp = new Path(tmpURI);
-        Path newPath = copyRemoteFiles(filesDir, tmp, conf, replication);
+        Path newPath = copyRemoteFiles(filesDir, tmp, conf, submitReplication);
         try {
           URI pathURI = getPathURI(newPath, tmpURI.getFragment());
           DistributedCache.addCacheFile(pathURI, conf);
         } catch (URISyntaxException ue) {
           // should not throw a uri exception
-          throw new IOException("Failed to create uri for " + tmpFile, ue);
+          throw new IOException(
+              "Failed to create a URI (URISyntaxException) for the remote path "
+                  + newPath + ". This was based on the files parameter: "
+                  + tmpFile,
+              ue);
         }
       }
     }
+  }
 
-    if (libjars != null) {
-      FileSystem.mkdirs(jtFs, libjarsDir, mapredSysPerms);
-      String[] libjarsArr = libjars.split(",");
-      for (String tmpjars : libjarsArr) {
-        Path tmp = new Path(tmpjars);
-        Path newPath = copyRemoteFiles(libjarsDir, tmp, conf, replication);
-
-        // Add each file to the classpath
-        DistributedCache.addFileToClassPath(
-            new Path(newPath.toUri().getPath()), conf, jtFs, !useWildcard);
+  // Suppress warning for use of DistributedCache (it is everywhere).
+  @SuppressWarnings("deprecation")
+  @VisibleForTesting
+  void uploadLibJars(Configuration conf, Collection<String> libjars,
+      Path submitJobDir, FsPermission mapredSysPerms, short submitReplication)
+      throws IOException {
+    Path libjarsDir = JobSubmissionFiles.getJobDistCacheLibjars(submitJobDir);
+    if (!libjars.isEmpty()) {
+      mkdirs(jtFs, libjarsDir, mapredSysPerms);
+      Collection<URI> libjarURIs = new LinkedList<>();
+      boolean foundFragment = false;
+      for (String tmpjars : libjars) {
+        URI tmpURI = null;
+        try {
+          tmpURI = new URI(tmpjars);
+        } catch (URISyntaxException e) {
+          throw new IllegalArgumentException("Error parsing libjars argument."
+              + " Argument must be a valid URI: " + tmpjars, e);
+        }
+        Path tmp = new Path(tmpURI);
+        Path newPath =
+            copyRemoteFiles(libjarsDir, tmp, conf, submitReplication);
+        try {
+          URI pathURI = getPathURI(newPath, tmpURI.getFragment());
+          if (!foundFragment) {
+            foundFragment = pathURI.getFragment() != null;
+          }
+          DistributedCache.addFileToClassPath(new Path(pathURI.getPath()), conf,
+              jtFs, false);
+          libjarURIs.add(pathURI);
+        } catch (URISyntaxException ue) {
+          // should not throw a uri exception
+          throw new IOException(
+              "Failed to create a URI (URISyntaxException) for the remote path "
+                  + newPath + ". This was based on the libjar parameter: "
+                  + tmpjars,
+              ue);
+        }
       }
 
-      if (useWildcard) {
-        // Add the whole directory to the cache
+      if (useWildcard && !foundFragment) {
+        // Add the whole directory to the cache using a wild card
         Path libJarsDirWildcard =
             jtFs.makeQualified(new Path(libjarsDir, DistributedCache.WILDCARD));
-
         DistributedCache.addCacheFile(libJarsDirWildcard.toUri(), conf);
+      } else {
+        for (URI uri : libjarURIs) {
+          DistributedCache.addCacheFile(uri, conf);
+        }
       }
     }
+  }
 
-    if (archives != null) {
-      FileSystem.mkdirs(jtFs, archivesDir, mapredSysPerms);
-      String[] archivesArr = archives.split(",");
-      for (String tmpArchives : archivesArr) {
+  @VisibleForTesting
+  void uploadArchives(Configuration conf, Collection<String> archives,
+      Path submitJobDir, FsPermission mapredSysPerms, short submitReplication)
+      throws IOException {
+    Path archivesDir = JobSubmissionFiles.getJobDistCacheArchives(submitJobDir);
+    if (!archives.isEmpty()) {
+      mkdirs(jtFs, archivesDir, mapredSysPerms);
+      for (String tmpArchives : archives) {
         URI tmpURI;
         try {
           tmpURI = new URI(tmpArchives);
         } catch (URISyntaxException e) {
-          throw new IllegalArgumentException(e);
+          throw new IllegalArgumentException("Error parsing archives argument."
+              + " Argument must be a valid URI: " + tmpArchives, e);
         }
         Path tmp = new Path(tmpURI);
-        Path newPath = copyRemoteFiles(archivesDir, tmp, conf, replication);
+        Path newPath =
+            copyRemoteFiles(archivesDir, tmp, conf, submitReplication);
         try {
           URI pathURI = getPathURI(newPath, tmpURI.getFragment());
           DistributedCache.addCacheArchive(pathURI, conf);
         } catch (URISyntaxException ue) {
           // should not throw an uri excpetion
-          throw new IOException("Failed to create uri for " + tmpArchives, ue);
+          throw new IOException(
+              "Failed to create a URI (URISyntaxException) for the remote path"
+                  + newPath + ". This was based on the archive parameter: "
+                  + tmpArchives,
+              ue);
         }
       }
     }
+  }
 
+  @VisibleForTesting
+  void uploadJobJar(Job job, String jobJar, Path submitJobDir,
+      short submitReplication) throws IOException {
     if (jobJar != null) { // copy jar to JobTracker's fs
       // use jar name if job is not named.
       if ("".equals(job.getJobName())) {
@@ -174,27 +249,193 @@ class JobResourceUploader {
       // we don't need to copy it from local fs
       if (jobJarURI.getScheme() == null || jobJarURI.getScheme().equals("file")) {
         copyJar(jobJarPath, JobSubmissionFiles.getJobJar(submitJobDir),
-            replication);
+            submitReplication);
         job.setJar(JobSubmissionFiles.getJobJar(submitJobDir).toString());
       }
     } else {
       LOG.warn("No job jar file set.  User classes may not be found. "
           + "See Job or Job#setJar(String).");
     }
+  }
 
-    addLog4jToDistributedCache(job, submitJobDir);
+  /**
+   * Verify that the resources this job is going to localize are within the
+   * localization limits.
+   */
+  @VisibleForTesting
+  void checkLocalizationLimits(Configuration conf, Collection<String> files,
+      Collection<String> libjars, Collection<String> archives, String jobJar,
+      Map<URI, FileStatus> statCache) throws IOException {
 
-    // set the timestamps of the archives and files
-    // set the public/private visibility of the archives and files
-    ClientDistributedCacheManager.determineTimestampsAndCacheVisibilities(conf);
-    // get DelegationToken for cached file
-    ClientDistributedCacheManager.getDelegationTokens(conf,
-        job.getCredentials());
+    LimitChecker limitChecker = new LimitChecker(conf);
+    if (!limitChecker.hasLimits()) {
+      // there are no limits set, so we are done.
+      return;
+    }
+
+    // Get the files and archives that are already in the distributed cache
+    Collection<String> dcFiles =
+        conf.getStringCollection(MRJobConfig.CACHE_FILES);
+    Collection<String> dcArchives =
+        conf.getStringCollection(MRJobConfig.CACHE_ARCHIVES);
+
+    for (String uri : dcFiles) {
+      explorePath(conf, stringToPath(uri), limitChecker, statCache);
+    }
+
+    for (String uri : dcArchives) {
+      explorePath(conf, stringToPath(uri), limitChecker, statCache);
+    }
+
+    for (String uri : files) {
+      explorePath(conf, stringToPath(uri), limitChecker, statCache);
+    }
+
+    for (String uri : libjars) {
+      explorePath(conf, stringToPath(uri), limitChecker, statCache);
+    }
+
+    for (String uri : archives) {
+      explorePath(conf, stringToPath(uri), limitChecker, statCache);
+    }
+
+    if (jobJar != null) {
+      explorePath(conf, stringToPath(jobJar), limitChecker, statCache);
+    }
+  }
+
+  /**
+   * Convert a String to a Path and gracefully remove fragments/queries if they
+   * exist in the String.
+   */
+  @VisibleForTesting
+  Path stringToPath(String s) {
+    try {
+      URI uri = new URI(s);
+      return new Path(uri.getScheme(), uri.getAuthority(), uri.getPath());
+    } catch (URISyntaxException e) {
+      throw new IllegalArgumentException(
+          "Error parsing argument." + " Argument must be a valid URI: " + s, e);
+    }
+  }
+
+  @VisibleForTesting
+  protected static final String MAX_RESOURCE_ERR_MSG =
+      "This job has exceeded the maximum number of submitted resources";
+  @VisibleForTesting
+  protected static final String MAX_TOTAL_RESOURCE_MB_ERR_MSG =
+      "This job has exceeded the maximum size of submitted resources";
+  @VisibleForTesting
+  protected static final String MAX_SINGLE_RESOURCE_MB_ERR_MSG =
+      "This job has exceeded the maximum size of a single submitted resource";
+
+  private static class LimitChecker {
+    LimitChecker(Configuration conf) {
+      this.maxNumOfResources =
+          conf.getInt(MRJobConfig.MAX_RESOURCES,
+              MRJobConfig.MAX_RESOURCES_DEFAULT);
+      this.maxSizeMB =
+          conf.getLong(MRJobConfig.MAX_RESOURCES_MB,
+              MRJobConfig.MAX_RESOURCES_MB_DEFAULT);
+      this.maxSizeOfResourceMB =
+          conf.getLong(MRJobConfig.MAX_SINGLE_RESOURCE_MB,
+              MRJobConfig.MAX_SINGLE_RESOURCE_MB_DEFAULT);
+      this.totalConfigSizeBytes = maxSizeMB * 1024 * 1024;
+      this.totalConfigSizeOfResourceBytes = maxSizeOfResourceMB * 1024 * 1024;
+    }
+
+    private long totalSizeBytes = 0;
+    private int totalNumberOfResources = 0;
+    private long currentMaxSizeOfFileBytes = 0;
+    private final long maxSizeMB;
+    private final int maxNumOfResources;
+    private final long maxSizeOfResourceMB;
+    private final long totalConfigSizeBytes;
+    private final long totalConfigSizeOfResourceBytes;
+
+    private boolean hasLimits() {
+      return maxNumOfResources > 0 || maxSizeMB > 0 || maxSizeOfResourceMB > 0;
+    }
+
+    private void addFile(Path p, long fileSizeBytes) throws IOException {
+      totalNumberOfResources++;
+      totalSizeBytes += fileSizeBytes;
+      if (fileSizeBytes > currentMaxSizeOfFileBytes) {
+        currentMaxSizeOfFileBytes = fileSizeBytes;
+      }
+
+      if (totalConfigSizeBytes > 0 && totalSizeBytes > totalConfigSizeBytes) {
+        throw new IOException(MAX_TOTAL_RESOURCE_MB_ERR_MSG + " (Max: "
+            + maxSizeMB + "MB).");
+      }
+
+      if (maxNumOfResources > 0 &&
+          totalNumberOfResources > maxNumOfResources) {
+        throw new IOException(MAX_RESOURCE_ERR_MSG + " (Max: "
+            + maxNumOfResources + ").");
+      }
+
+      if (totalConfigSizeOfResourceBytes > 0
+          && currentMaxSizeOfFileBytes > totalConfigSizeOfResourceBytes) {
+        throw new IOException(MAX_SINGLE_RESOURCE_MB_ERR_MSG + " (Max: "
+            + maxSizeOfResourceMB + "MB, Violating resource: " + p + ").");
+      }
+    }
+  }
+
+  /**
+   * Recursively explore the given path and enforce the limits for resource
+   * localization. This method assumes that there are no symlinks in the
+   * directory structure.
+   */
+  private void explorePath(Configuration job, Path p,
+      LimitChecker limitChecker, Map<URI, FileStatus> statCache)
+      throws IOException {
+    Path pathWithScheme = p;
+    if (!pathWithScheme.toUri().isAbsolute()) {
+      // the path does not have a scheme, so we assume it is a path from the
+      // local filesystem
+      FileSystem localFs = FileSystem.getLocal(job);
+      pathWithScheme = localFs.makeQualified(p);
+    }
+    FileStatus status = getFileStatus(statCache, job, pathWithScheme);
+    if (status.isDirectory()) {
+      FileStatus[] statusArray =
+          pathWithScheme.getFileSystem(job).listStatus(pathWithScheme);
+      for (FileStatus s : statusArray) {
+        explorePath(job, s.getPath(), limitChecker, statCache);
+      }
+    } else {
+      limitChecker.addFile(pathWithScheme, status.getLen());
+    }
+  }
+
+  @VisibleForTesting
+  FileStatus getFileStatus(Map<URI, FileStatus> statCache,
+      Configuration job, Path p) throws IOException {
+    URI u = p.toUri();
+    FileStatus status = statCache.get(u);
+    if (status == null) {
+      status = p.getFileSystem(job).getFileStatus(p);
+      statCache.put(u, status);
+    }
+    return status;
+  }
+
+  /**
+   * Create a new directory in the passed filesystem. This wrapper method exists
+   * so that it can be overridden/stubbed during testing.
+   */
+  @VisibleForTesting
+  boolean mkdirs(FileSystem fs, Path dir, FsPermission permission)
+      throws IOException {
+    return FileSystem.mkdirs(fs, dir, permission);
   }
 
   // copies a file to the jobtracker filesystem and returns the path where it
   // was copied to
-  private Path copyRemoteFiles(Path parentDir, Path originalPath,
+  @VisibleForTesting
+  Path copyRemoteFiles(Path parentDir, Path originalPath,
       Configuration conf, short replication) throws IOException {
     // check if we do not need to copy the files
     // is jt using the same file system.
@@ -212,10 +453,12 @@ class JobResourceUploader {
     Path newPath = new Path(parentDir, originalPath.getName());
     FileUtil.copy(remoteFs, originalPath, jtFs, newPath, false, conf);
     jtFs.setReplication(newPath, replication);
+    jtFs.makeQualified(newPath);
     return newPath;
   }
 
-  private void copyJar(Path originalJarPath, Path submitJarFile,
+  @VisibleForTesting
+  void copyJar(Path originalJarPath, Path submitJarFile,
       short replication) throws IOException {
     jtFs.copyFromLocalFile(originalJarPath, submitJarFile);
     jtFs.setReplication(submitJarFile, replication);
@@ -239,7 +482,7 @@ class JobResourceUploader {
     URI pathURI = destPath.toUri();
     if (pathURI.getFragment() == null) {
       if (fragment == null) {
-        pathURI = new URI(pathURI.toString() + "#" + destPath.getName());
+        // no fragment, just return existing pathURI from destPath
       } else {
         pathURI = new URI(pathURI.toString() + "#" + fragment);
       }
@@ -261,9 +504,11 @@ class JobResourceUploader {
     LOG.debug("default FileSystem: " + jtFs.getUri());
     FsPermission mapredSysPerms =
         new FsPermission(JobSubmissionFiles.JOB_DIR_PERMISSION);
-    if (!jtFs.exists(submitJobDir)) {
+    try {
+      jtFs.getFileStatus(submitJobDir);
+    } catch (FileNotFoundException e) {
       throw new IOException("Cannot find job submission directory! "
-          + "It should just be created, so something wrong here.");
+          + "It should just be created, so something wrong here.", e);
     }
 
     Path fileDir = JobSubmissionFiles.getJobLog4jFile(submitJobDir);
@@ -314,9 +559,7 @@ class JobResourceUploader {
     if (pathURI.getScheme() == null) {
       // default to the local file system
       // check if the file exists or not first
-      if (!localFs.exists(path)) {
-        throw new FileNotFoundException("File " + file + " does not exist.");
-      }
+      localFs.getFileStatus(path);
       finalPath =
           path.makeQualified(localFs.getUri(), localFs.getWorkingDirectory())
               .toString();
@@ -326,9 +569,7 @@ class JobResourceUploader {
       // these files to the file system ResourceManager is running
       // on.
       FileSystem fs = path.getFileSystem(conf);
-      if (!fs.exists(path)) {
-        throw new FileNotFoundException("File " + file + " does not exist.");
-      }
+      fs.getFileStatus(path);
       finalPath =
           path.makeQualified(fs.getUri(), fs.getWorkingDirectory()).toString();
     }

@@ -421,7 +421,8 @@ public class NativeS3FileSystem extends FileSystem {
   @Override
   public FSDataOutputStream append(Path f, int bufferSize,
       Progressable progress) throws IOException {
-    throw new IOException("Not supported");
+    throw new UnsupportedOperationException("Append is not supported "
+        + "by NativeS3FileSystem");
   }
   
   @Override
@@ -586,7 +587,12 @@ public class NativeS3FileSystem extends FileSystem {
       for (String commonPrefix : listing.getCommonPrefixes()) {
         Path subpath = keyToPath(commonPrefix);
         String relativePath = pathUri.relativize(subpath.toUri()).getPath();
-        status.add(newDirectory(new Path(absolutePath, relativePath)));
+        // sometimes the common prefix includes the base dir (HADOOP-13830).
+        // avoid that problem by detecting it and keeping it out
+        // of the list
+        if (!relativePath.isEmpty()) {
+          status.add(newDirectory(new Path(absolutePath, relativePath)));
+        }
       }
       priorLastKey = listing.getPriorLastKey();
     } while (priorLastKey != null);

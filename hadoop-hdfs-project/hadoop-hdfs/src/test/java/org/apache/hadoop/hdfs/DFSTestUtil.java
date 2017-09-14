@@ -27,6 +27,7 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
 
 import java.io.BufferedOutputStream;
@@ -49,6 +50,7 @@ import java.lang.reflect.Modifier;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
@@ -60,16 +62,20 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+
 import com.google.common.base.Charsets;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.base.Supplier;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -105,18 +111,25 @@ import org.apache.hadoop.hdfs.client.HdfsDataInputStream;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
+import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo.AdminStates;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo.DatanodeInfoBuilder;
+import org.apache.hadoop.hdfs.protocol.ECBlockGroupStats;
+import org.apache.hadoop.hdfs.protocol.ReplicatedBlockStats;
+import org.apache.hadoop.hdfs.protocol.SystemErasureCodingPolicies;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LayoutVersion;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
-import org.apache.hadoop.hdfs.protocol.LocatedStripedBlock;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
 import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.BlockOpResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.DataTransferProtos.Status;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
+import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
 import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
@@ -166,10 +179,9 @@ import org.apache.hadoop.util.VersionInfo;
 import org.apache.log4j.Level;
 import org.junit.Assume;
 import org.mockito.internal.util.reflection.Whitebox;
+import org.apache.hadoop.util.ToolRunner;
 
 import com.google.common.annotations.VisibleForTesting;
-import static org.apache.hadoop.hdfs.StripedFileTestUtil.BLOCK_STRIPED_CELL_SIZE;
-import static org.apache.hadoop.hdfs.StripedFileTestUtil.NUM_DATA_BLOCKS;
 
 /** Utilities for HDFS tests */
 public class DFSTestUtil {
@@ -274,6 +286,15 @@ public class DFSTestUtil {
     newLog.restart();
     Whitebox.setInternalState(fsn.getFSImage(), "editLog", newLog);
     Whitebox.setInternalState(fsn.getFSDirectory(), "editLog", newLog);
+  }
+
+  public static void enableAllECPolicies(DistributedFileSystem fs)
+      throws IOException {
+    // Enable all available EC policies
+    for (ErasureCodingPolicy ecPolicy :
+        SystemErasureCodingPolicies.getPolicies()) {
+      fs.enableErasureCodingPolicy(ecPolicy.getName());
+    }
   }
 
   /** class MyFile contains enough information to recreate the contents of
@@ -848,7 +869,27 @@ public class DFSTestUtil {
       out.write(toAppend);
     }
   }
-  
+
+  /**
+   * Append specified length of bytes to a given file, starting with new block.
+   * @param fs The file system
+   * @param p Path of the file to append
+   * @param length Length of bytes to append to the file
+   * @throws IOException
+   */
+  public static void appendFileNewBlock(DistributedFileSystem fs,
+      Path p, int length) throws IOException {
+    assert fs.exists(p);
+    assert length >= 0;
+    byte[] toAppend = new byte[length];
+    Random random = new Random();
+    random.nextBytes(toAppend);
+    try (FSDataOutputStream out = fs.append(p,
+        EnumSet.of(CreateFlag.APPEND, CreateFlag.NEW_BLOCK), 4096, null)) {
+      out.write(toAppend);
+    }
+  }
+
   /**
    * @return url content as string (UTF-8 encoding assumed)
    */
@@ -985,7 +1026,8 @@ public class DFSTestUtil {
       // send the request
       new Sender(out).transferBlock(b, new Token<BlockTokenIdentifier>(),
           dfsClient.clientName, new DatanodeInfo[]{datanodes[1]},
-          new StorageType[]{StorageType.DEFAULT});
+          new StorageType[]{StorageType.DEFAULT},
+          new String[0]);
       out.flush();
 
       return BlockOpResponseProto.parseDelimitedFrom(in);
@@ -1064,34 +1106,42 @@ public class DFSTestUtil {
   }
 
   public static DatanodeInfo getLocalDatanodeInfo() {
-    return new DatanodeInfo(getLocalDatanodeID());
+    return new DatanodeInfoBuilder().setNodeID(getLocalDatanodeID())
+        .build();
   }
 
   public static DatanodeInfo getDatanodeInfo(String ipAddr) {
-    return new DatanodeInfo(getDatanodeID(ipAddr));
+    return new DatanodeInfoBuilder().setNodeID(getDatanodeID(ipAddr))
+        .build();
   }
   
   public static DatanodeInfo getLocalDatanodeInfo(int port) {
-    return new DatanodeInfo(getLocalDatanodeID(port));
+    return new DatanodeInfoBuilder().setNodeID(getLocalDatanodeID(port))
+        .build();
   }
 
   public static DatanodeInfo getDatanodeInfo(String ipAddr, 
       String host, int port) {
-    return new DatanodeInfo(new DatanodeID(ipAddr, host,
-        UUID.randomUUID().toString(), port,
-        DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
-        DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
-        DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT));
+    return new DatanodeInfoBuilder().setNodeID(
+        new DatanodeID(ipAddr, host, UUID.randomUUID().toString(), port,
+            DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
+            DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
+            DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT)).build();
   }
 
   public static DatanodeInfo getLocalDatanodeInfo(String ipAddr,
       String hostname, AdminStates adminState) {
-    return new DatanodeInfo(ipAddr, hostname, "",
-        DFSConfigKeys.DFS_DATANODE_DEFAULT_PORT,
-        DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT,
-        DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT,
-        DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT,
-        1l, 2l, 3l, 4l, 0l, 0l, 0l, 5, 6, "local", adminState);
+    return new DatanodeInfoBuilder().setIpAddr(ipAddr).setHostName(hostname)
+        .setDatanodeUuid("")
+        .setXferPort(DFSConfigKeys.DFS_DATANODE_DEFAULT_PORT)
+        .setInfoPort(DFSConfigKeys.DFS_DATANODE_HTTP_DEFAULT_PORT)
+        .setInfoSecurePort(DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT)
+        .setIpcPort(DFSConfigKeys.DFS_DATANODE_IPC_DEFAULT_PORT).setCapacity(1L)
+        .setDfsUsed(2L).setRemaining(3L).setBlockPoolUsed(4L)
+        .setCacheCapacity(0L).setCacheUsed(0L).setLastUpdate(0L)
+        .setLastUpdateMonotonic(5).setXceiverCount(6)
+        .setNetworkLocation("local").setAdminState(adminState)
+        .build();
   }
 
   public static DatanodeDescriptor getDatanodeDescriptor(String ipAddr,
@@ -1420,6 +1470,11 @@ public class DFSTestUtil {
     out.abort();
   }
 
+  public static void setPipeline(DFSOutputStream out, LocatedBlock lastBlock)
+      throws IOException {
+    out.getStreamer().setPipelineInConstruction(lastBlock);
+  }
+
   public static byte[] asArray(ByteBuffer buf) {
     byte arr[] = new byte[buf.remaining()];
     buf.duplicate().get(arr);
@@ -1601,6 +1656,50 @@ public class DFSTestUtil {
   }
 
   /**
+   * Verify the aggregated {@link ClientProtocol#getStats()} block counts equal
+   * the sum of {@link ClientProtocol#getReplicatedBlockStats()} and
+   * {@link ClientProtocol#getECBlockGroupStats()}.
+   * @throws Exception
+   */
+  public static  void verifyClientStats(Configuration conf,
+      MiniDFSCluster cluster) throws Exception {
+    ClientProtocol client = NameNodeProxies.createProxy(conf,
+        cluster.getFileSystem(0).getUri(),
+        ClientProtocol.class).getProxy();
+    long[] aggregatedStats = cluster.getNameNode().getRpcServer().getStats();
+    ReplicatedBlockStats replicatedBlockStats =
+        client.getReplicatedBlockStats();
+    ECBlockGroupStats ecBlockGroupStats = client.getECBlockGroupStats();
+
+    assertEquals("Under replicated stats not matching!",
+        aggregatedStats[ClientProtocol.GET_STATS_LOW_REDUNDANCY_IDX],
+        aggregatedStats[ClientProtocol.GET_STATS_UNDER_REPLICATED_IDX]);
+    assertEquals("Low redundancy stats not matching!",
+        aggregatedStats[ClientProtocol.GET_STATS_LOW_REDUNDANCY_IDX],
+        replicatedBlockStats.getLowRedundancyBlocks() +
+            ecBlockGroupStats.getLowRedundancyBlockGroups());
+    assertEquals("Corrupt blocks stats not matching!",
+        aggregatedStats[ClientProtocol.GET_STATS_CORRUPT_BLOCKS_IDX],
+        replicatedBlockStats.getCorruptBlocks() +
+            ecBlockGroupStats.getCorruptBlockGroups());
+    assertEquals("Missing blocks stats not matching!",
+        aggregatedStats[ClientProtocol.GET_STATS_MISSING_BLOCKS_IDX],
+        replicatedBlockStats.getMissingReplicaBlocks() +
+            ecBlockGroupStats.getMissingBlockGroups());
+    assertEquals("Missing blocks with replication factor one not matching!",
+        aggregatedStats[ClientProtocol.GET_STATS_MISSING_REPL_ONE_BLOCKS_IDX],
+        replicatedBlockStats.getMissingReplicationOneBlocks());
+    assertEquals("Bytes in future blocks stats not matching!",
+        aggregatedStats[ClientProtocol.GET_STATS_BYTES_IN_FUTURE_BLOCKS_IDX],
+        replicatedBlockStats.getBytesInFutureBlocks() +
+            ecBlockGroupStats.getBytesInFutureBlockGroups());
+    assertEquals("Pending deletion blocks stats not matching!",
+        aggregatedStats[ClientProtocol.GET_STATS_PENDING_DELETION_BLOCKS_IDX],
+        replicatedBlockStats.getPendingDeletionBlocks() +
+            ecBlockGroupStats.getPendingDeletionBlocks());
+  }
+
+  /**
    * Helper function to create a key in the Key Provider. Defaults
    * to the first indexed NameNode's Key Provider.
    *
@@ -1766,8 +1865,8 @@ public class DFSTestUtil {
     }, 100, waitTime);
   }
 
- /**
-   * Change the length of a block at datanode dnIndex
+  /**
+   * Change the length of a block at datanode dnIndex.
    */
   public static boolean changeReplicaLength(MiniDFSCluster cluster,
       ExtendedBlock blk, int dnIndex, int lenDelta) throws IOException {
@@ -1831,7 +1930,11 @@ public class DFSTestUtil {
    */
   public static void setDatanodeDead(DatanodeInfo dn) {
     dn.setLastUpdate(0);
-    dn.setLastUpdateMonotonic(0);
+    // Set this to a large negative value.
+    // On short-lived VMs, the monotonic time can be less than the heartbeat
+    // expiry time. Setting this to 0 will fail to immediately mark the DN as
+    // dead.
+    dn.setLastUpdateMonotonic(Long.MIN_VALUE/2);
   }
 
   /**
@@ -1878,21 +1981,42 @@ public class DFSTestUtil {
    * Creates the metadata of a file in striped layout. This method only
    * manipulates the NameNode state without injecting data to DataNode.
    * You should disable periodical heartbeat before use this.
-   *  @param file Path of the file to create
+   * @param file Path of the file to create
    * @param dir Parent path of the file
    * @param numBlocks Number of striped block groups to add to the file
    * @param numStripesPerBlk Number of striped cells in each block
    * @param toMkdir
    */
-  public static void createStripedFile(MiniDFSCluster cluster, Path file, Path dir,
-      int numBlocks, int numStripesPerBlk, boolean toMkdir) throws Exception {
+  public static void createStripedFile(MiniDFSCluster cluster, Path file,
+      Path dir, int numBlocks, int numStripesPerBlk, boolean toMkdir)
+      throws Exception {
+    createStripedFile(cluster, file, dir, numBlocks, numStripesPerBlk,
+        toMkdir, StripedFileTestUtil.getDefaultECPolicy());
+  }
+
+  /**
+   * Creates the metadata of a file in striped layout. This method only
+   * manipulates the NameNode state without injecting data to DataNode.
+   * You should disable periodical heartbeat before use this.
+   * @param file Path of the file to create
+   * @param dir Parent path of the file
+   * @param numBlocks Number of striped block groups to add to the file
+   * @param numStripesPerBlk Number of striped cells in each block
+   * @param toMkdir
+   * @param ecPolicy erasure coding policy apply to created file. A null value
+   *                 means using default erasure coding policy.
+   */
+  public static void createStripedFile(MiniDFSCluster cluster, Path file,
+      Path dir, int numBlocks, int numStripesPerBlk, boolean toMkdir,
+      ErasureCodingPolicy ecPolicy) throws Exception {
     DistributedFileSystem dfs = cluster.getFileSystem();
     // If outer test already set EC policy, dir should be left as null
     if (toMkdir) {
       assert dir != null;
       dfs.mkdirs(dir);
       try {
-        dfs.getClient().setErasureCodingPolicy(dir.toString(), null);
+        dfs.getClient()
+            .setErasureCodingPolicy(dir.toString(), ecPolicy.getName());
       } catch (IOException e) {
         if (!e.getMessage().contains("non-empty directory")) {
           throw e;
@@ -1904,7 +2028,7 @@ public class DFSTestUtil {
         .create(file.toString(), new FsPermission((short)0755),
         dfs.getClient().getClientName(),
         new EnumSetWritable<>(EnumSet.of(CreateFlag.CREATE)),
-        false, (short)1, 128*1024*1024L, null);
+        false, (short)1, 128*1024*1024L, null, null);
 
     FSNamesystem ns = cluster.getNamesystem();
     FSDirectory fsdir = ns.getFSDirectory();
@@ -1960,9 +2084,11 @@ public class DFSTestUtil {
       }
     }
 
+    final ErasureCodingPolicy ecPolicy =
+        fs.getErasureCodingPolicy(new Path(file));
     // 2. RECEIVED_BLOCK IBR
     long blockSize = isStripedBlock ?
-        numStripes * BLOCK_STRIPED_CELL_SIZE : len;
+        numStripes * ecPolicy.getCellSize() : len;
     for (int i = 0; i < groupSize; i++) {
       DataNode dn = dataNodes.get(i);
       final Block block = new Block(lastBlock.getBlockId() + i,
@@ -1976,9 +2102,52 @@ public class DFSTestUtil {
       }
     }
     long bytes = isStripedBlock ?
-        numStripes * BLOCK_STRIPED_CELL_SIZE * NUM_DATA_BLOCKS : len;
+        numStripes * ecPolicy.getCellSize() * ecPolicy.getNumDataUnits() : len;
     lastBlock.setNumBytes(bytes);
     return lastBlock;
+  }
+
+  /*
+   * Copy a block from sourceProxy to destination. If the block becomes
+   * over-replicated, preferably remove it from source.
+   * Return true if a block is successfully copied; otherwise false.
+   */
+  public static boolean replaceBlock(ExtendedBlock block, DatanodeInfo source,
+      DatanodeInfo sourceProxy, DatanodeInfo destination) throws IOException {
+    return replaceBlock(block, source, sourceProxy, destination,
+        StorageType.DEFAULT, Status.SUCCESS);
+  }
+
+  /*
+   * Replace block
+   */
+  public static boolean replaceBlock(ExtendedBlock block, DatanodeInfo source,
+      DatanodeInfo sourceProxy, DatanodeInfo destination,
+      StorageType targetStorageType, Status opStatus) throws IOException,
+      SocketException {
+    Socket sock = new Socket();
+    try {
+      sock.connect(NetUtils.createSocketAddr(destination.getXferAddr()),
+          HdfsConstants.READ_TIMEOUT);
+      sock.setKeepAlive(true);
+      // sendRequest
+      DataOutputStream out = new DataOutputStream(sock.getOutputStream());
+      new Sender(out).replaceBlock(block, targetStorageType,
+          BlockTokenSecretManager.DUMMY_TOKEN, source.getDatanodeUuid(),
+          sourceProxy, null);
+      out.flush();
+      // receiveResponse
+      DataInputStream reply = new DataInputStream(sock.getInputStream());
+
+      BlockOpResponseProto proto = BlockOpResponseProto.parseDelimitedFrom(
+          reply);
+      while (proto.getStatus() == Status.IN_PROGRESS) {
+        proto = BlockOpResponseProto.parseDelimitedFrom(reply);
+      }
+      return proto.getStatus() == opStatus;
+    } finally {
+      sock.close();
+    }
   }
 
   /**
@@ -2013,5 +2182,107 @@ public class DFSTestUtil {
         }
       }
     }, 1000, 60000);
+  }
+
+  /**
+   * Close current file system and create a new instance as given
+   * {@link UserGroupInformation}.
+   */
+  public static FileSystem login(final FileSystem fs,
+      final Configuration conf, final UserGroupInformation ugi)
+          throws IOException, InterruptedException {
+    if (fs != null) {
+      fs.close();
+    }
+    return DFSTestUtil.getFileSystemAs(ugi, conf);
+  }
+
+  /**
+   * Test if the given {@link FileStatus} user, group owner and its permission
+   * are expected, throw {@link AssertionError} if any value is not expected.
+   */
+  public static void verifyFilePermission(FileStatus stat, String owner,
+      String group, FsAction u, FsAction g, FsAction o) {
+    if(stat != null) {
+      if(!Strings.isNullOrEmpty(owner)) {
+        assertEquals(owner, stat.getOwner());
+      }
+      if(!Strings.isNullOrEmpty(group)) {
+        assertEquals(group, stat.getGroup());
+      }
+      FsPermission permission = stat.getPermission();
+      if(u != null) {
+        assertEquals(u, permission.getUserAction());
+      }
+      if (g != null) {
+        assertEquals(g, permission.getGroupAction());
+      }
+      if (o != null) {
+        assertEquals(o, permission.getOtherAction());
+      }
+    }
+  }
+
+  public static void verifyDelete(FsShell shell, FileSystem fs, Path path,
+      boolean shouldExistInTrash) throws Exception {
+    Path trashPath = Path.mergePaths(shell.getCurrentTrashDir(path), path);
+
+    verifyDelete(shell, fs, path, trashPath, shouldExistInTrash);
+  }
+
+  public static void verifyDelete(FsShell shell, FileSystem fs, Path path,
+      Path trashPath, boolean shouldExistInTrash) throws Exception {
+    assertTrue(path + " file does not exist", fs.exists(path));
+
+    // Verify that trashPath has a path component named ".Trash"
+    Path checkTrash = trashPath;
+    while (!checkTrash.isRoot() && !checkTrash.getName().equals(".Trash")) {
+      checkTrash = checkTrash.getParent();
+    }
+    assertEquals("No .Trash component found in trash path " + trashPath,
+        ".Trash", checkTrash.getName());
+
+    String[] argv = new String[]{"-rm", "-r", path.toString()};
+    int res = ToolRunner.run(shell, argv);
+    assertEquals("rm failed", 0, res);
+    if (shouldExistInTrash) {
+      assertTrue("File not in trash : " + trashPath, fs.exists(trashPath));
+    } else {
+      assertFalse("File in trash : " + trashPath, fs.exists(trashPath));
+    }
+  }
+
+  public static Map<Path, FSDataOutputStream> createOpenFiles(FileSystem fs,
+      String filePrefix, int numFilesToCreate) throws IOException {
+    final Map<Path, FSDataOutputStream> filesCreated = new HashMap<>();
+    final byte[] buffer = new byte[(int) (1024 * 1.75)];
+    final Random rand = new Random(0xFEED0BACL);
+    for (int i = 0; i < numFilesToCreate; i++) {
+      Path file = new Path("/" + filePrefix + "-" + i);
+      FSDataOutputStream stm = fs.create(file, true, 1024, (short) 1, 1024);
+      rand.nextBytes(buffer);
+      stm.write(buffer);
+      filesCreated.put(file, stm);
+    }
+    return filesCreated;
+  }
+
+  public static HashSet<Path> closeOpenFiles(
+      HashMap<Path, FSDataOutputStream> openFilesMap,
+      int numFilesToClose) throws IOException {
+    HashSet<Path> closedFiles = new HashSet<>();
+    for (Iterator<Entry<Path, FSDataOutputStream>> it =
+         openFilesMap.entrySet().iterator(); it.hasNext();) {
+      Entry<Path, FSDataOutputStream> entry = it.next();
+      LOG.info("Closing file: " + entry.getKey());
+      entry.getValue().close();
+      closedFiles.add(entry.getKey());
+      it.remove();
+      numFilesToClose--;
+      if (numFilesToClose == 0) {
+        break;
+      }
+    }
+    return closedFiles;
   }
 }

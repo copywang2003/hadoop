@@ -26,9 +26,13 @@ import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.nio.charset.Charset;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -42,12 +46,14 @@ import org.slf4j.LoggerFactory;
  * A base class for running a Shell command.
  *
  * <code>Shell</code> can be used to run shell commands like <code>du</code> or
- * <code>df</code>. It also offers facilities to gate commands by 
+ * <code>df</code>. It also offers facilities to gate commands by
  * time-intervals.
  */
 @InterfaceAudience.Public
 @InterfaceStability.Evolving
 public abstract class Shell {
+  private static final Map<Shell, Object> CHILD_SHELLS =
+      Collections.synchronizedMap(new WeakHashMap<Shell, Object>());
   public static final Logger LOG = LoggerFactory.getLogger(Shell.class);
 
   /**
@@ -118,6 +124,21 @@ public abstract class Shell {
     }
   }
 
+  /**
+   * Quote the given arg so that bash will interpret it as a single value.
+   * Note that this quotes it for one level of bash, if you are passing it
+   * into a badly written shell script, you need to fix your shell script.
+   * @param arg the argument to quote
+   * @return the quoted string
+   */
+  static String bashQuote(String arg) {
+    StringBuilder buffer = new StringBuilder(arg.length() + 2);
+    buffer.append('\'');
+    buffer.append(arg.replace("'", "'\\''"));
+    buffer.append('\'');
+    return buffer.toString();
+  }
+
   /** a Unix command to get the current user's name: {@value}. */
   public static final String USER_NAME_COMMAND = "whoami";
 
@@ -173,7 +194,7 @@ public abstract class Shell {
   /** a Unix command to get the current user's groups list. */
   public static String[] getGroupsCommand() {
     return (WINDOWS)? new String[]{"cmd", "/c", "groups"}
-                    : new String[]{"bash", "-c", "groups"};
+                    : new String[]{"groups"};
   }
 
   /**
@@ -184,10 +205,14 @@ public abstract class Shell {
    */
   public static String[] getGroupsForUserCommand(final String user) {
     //'groups username' command return is inconsistent across different unixes
-    return WINDOWS ?
-      new String[]
-          {getWinUtilsPath(), "groups", "-F", "\"" + user + "\""}
-      : new String[] {"bash", "-c", "id -gn " + user + "; id -Gn " + user};
+    if (WINDOWS) {
+      return new String[]
+          {getWinUtilsPath(), "groups", "-F", "\"" + user + "\""};
+    } else {
+      String quotedUser = bashQuote(user);
+      return new String[] {"bash", "-c", "id -gn " + quotedUser +
+                            "; id -Gn " + quotedUser};
+    }
   }
 
   /**
@@ -199,23 +224,26 @@ public abstract class Shell {
    */
   public static String[] getGroupsIDForUserCommand(final String user) {
     //'groups username' command return is inconsistent across different unixes
-    return WINDOWS ?
-        new String[]
-            {getWinUtilsPath(), "groups", "-F", "\"" + user + "\""}
-        : new String[] {"bash", "-c", "id -g " + user + "; id -G " + user};
+    if (WINDOWS) {
+      return new String[]{getWinUtilsPath(), "groups", "-F", "\"" + user +
+                           "\""};
+    } else {
+      String quotedUser = bashQuote(user);
+      return new String[] {"bash", "-c", "id -g " + quotedUser + "; id -G " +
+                            quotedUser};
+    }
   }
 
   /** A command to get a given netgroup's user list. */
   public static String[] getUsersForNetgroupCommand(final String netgroup) {
     //'groups username' command return is non-consistent across different unixes
-    return WINDOWS ? new String [] {"cmd", "/c", "getent netgroup " + netgroup}
-                    : new String [] {"bash", "-c", "getent netgroup " + netgroup};
+    return new String[] {"getent", "netgroup", netgroup};
   }
 
   /** Return a command to get permission information. */
   public static String[] getGetPermissionCommand() {
     return (WINDOWS) ? new String[] { getWinUtilsPath(), "ls", "-F" }
-                     : new String[] { "/bin/ls", "-ld" };
+                     : new String[] { "ls", "-ld" };
   }
 
   /** Return a command to set permission. */
@@ -233,14 +261,15 @@ public abstract class Shell {
 
   /**
    * Return a command to set permission for specific file.
-   * 
+   *
    * @param perm String permission to set
    * @param recursive boolean true to apply to all sub-directories recursively
    * @param file String file to set
    * @return String[] containing command and arguments
    */
   public static String[] getSetPermissionCommand(String perm,
-      boolean recursive, String file) {
+                                                 boolean recursive,
+                                                 String file) {
     String[] baseCmd = getSetPermissionCommand(perm, recursive);
     String[] cmdWithFile = Arrays.copyOf(baseCmd, baseCmd.length + 1);
     cmdWithFile[cmdWithFile.length - 1] = file;
@@ -288,11 +317,16 @@ public abstract class Shell {
       }
     }
 
+    // Use the bash-builtin instead of the Unix kill command (usually
+    // /bin/kill) as the bash-builtin supports "--" in all Hadoop supported
+    // OSes.
+    final String quotedPid = bashQuote(pid);
     if (isSetsidAvailable) {
-      // Use the shell-builtin as it support "--" in all Hadoop supported OSes
-      return new String[] { "bash", "-c", "kill -" + code + " -- -" + pid };
+      return new String[] { "bash", "-c", "kill -" + code + " -- -" +
+          quotedPid };
     } else {
-      return new String[] { "bash", "-c", "kill -" + code + " " + pid };
+      return new String[] { "bash", "-c", "kill -" + code + " " +
+          quotedPid };
     }
   }
 
@@ -310,7 +344,7 @@ public abstract class Shell {
    * Returns a File referencing a script with the given basename, inside the
    * given parent directory.  The file extension is inferred by platform:
    * <code>".cmd"</code> on Windows, or <code>".sh"</code> otherwise.
-   * 
+   *
    * @param parent File parent directory
    * @param basename String script file basename
    * @return File referencing the script in the directory
@@ -342,8 +376,8 @@ public abstract class Shell {
   public static String[] getRunScriptCommand(File script) {
     String absolutePath = script.getAbsolutePath();
     return WINDOWS ?
-      new String[] { "cmd", "/c", absolutePath }
-      : new String[] { "/bin/bash", absolutePath };
+      new String[] {"cmd", "/c", absolutePath }
+      : new String[] {"bash", bashQuote(absolutePath) };
   }
 
   /** a Unix command to set permission: {@value}. */
@@ -527,11 +561,11 @@ public abstract class Shell {
 
   /**
    *  Fully qualify the path to a binary that should be in a known hadoop
-   *  bin location. This is primarily useful for disambiguating call-outs 
-   *  to executable sub-components of Hadoop to avoid clashes with other 
-   *  executables that may be in the path.  Caveat:  this call doesn't 
-   *  just format the path to the bin directory.  It also checks for file 
-   *  existence of the composed path. The output of this call should be 
+   *  bin location. This is primarily useful for disambiguating call-outs
+   *  to executable sub-components of Hadoop to avoid clashes with other
+   *  executables that may be in the path.  Caveat:  this call doesn't
+   *  just format the path to the bin directory.  It also checks for file
+   *  existence of the composed path. The output of this call should be
    *  cached by callers.
    *
    * @param executable executable
@@ -706,8 +740,7 @@ public abstract class Shell {
     }
   }
 
-  public static final boolean isBashSupported = checkIsBashSupported();
-  private static boolean checkIsBashSupported() {
+  public static boolean checkIsBashSupported() throws InterruptedIOException {
     if (Shell.WINDOWS) {
       return false;
     }
@@ -718,6 +751,9 @@ public abstract class Shell {
       String[] args = {"bash", "-c", "echo 1000"};
       shexec = new ShellCommandExecutor(args);
       shexec.execute();
+    } catch (InterruptedIOException iioe) {
+      LOG.warn("Interrupted, unable to determine if bash is supported", iioe);
+      throw iioe;
     } catch (IOException ioe) {
       LOG.warn("Bash is not supported by the OS", ioe);
       supported = false;
@@ -786,6 +822,7 @@ public abstract class Shell {
   private File dir;
   private Process process; // sub process used to execute the command
   private int exitCode;
+  private Thread waitingThread;
 
   /** Flag to indicate whether or not the script has finished executing. */
   private final AtomicBoolean completed = new AtomicBoolean(false);
@@ -851,7 +888,7 @@ public abstract class Shell {
   }
 
   /** Run the command. */
-  private void runCommand() throws IOException { 
+  private void runCommand() throws IOException {
     ProcessBuilder builder = new ProcessBuilder(getExecString());
     Timer timeOutTimer = null;
     ShellTimeoutTimerTask timeoutTimerTask = null;
@@ -873,7 +910,7 @@ public abstract class Shell {
     }
 
     builder.redirectErrorStream(redirectErrorStream);
-    
+
     if (Shell.WINDOWS) {
       synchronized (WindowsProcessLaunchLock) {
         // To workaround the race condition issue with child processes
@@ -887,6 +924,9 @@ public abstract class Shell {
       process = builder.start();
     }
 
+    waitingThread = Thread.currentThread();
+    CHILD_SHELLS.put(this, null);
+
     if (timeOutInterval > 0) {
       timeOutTimer = new Timer("Shell command timeout");
       timeoutTimerTask = new ShellTimeoutTimerTask(
@@ -894,7 +934,7 @@ public abstract class Shell {
       //One time scheduling.
       timeOutTimer.schedule(timeoutTimerTask, timeOutInterval);
     }
-    final BufferedReader errReader = 
+    final BufferedReader errReader =
             new BufferedReader(new InputStreamReader(
                 process.getErrorStream(), Charset.defaultCharset()));
     BufferedReader inReader =
@@ -915,7 +955,15 @@ public abstract class Shell {
             line = errReader.readLine();
           }
         } catch(IOException ioe) {
-          LOG.warn("Error reading the error stream", ioe);
+          // Its normal to observe a "Stream closed" I/O error on
+          // command timeouts destroying the underlying process
+          // so only log a WARN if the command didn't time out
+          if (!isTimedOut()) {
+            LOG.warn("Error reading the error stream", ioe);
+          } else {
+            LOG.debug("Error reading the error stream due to shell "
+                + "command timeout", ioe);
+          }
         }
       }
     };
@@ -932,7 +980,7 @@ public abstract class Shell {
       parseExecResult(inReader); // parse the output
       // clear the input stream buffer
       String line = inReader.readLine();
-      while(line != null) { 
+      while(line != null) {
         line = inReader.readLine();
       }
       // wait for the process to finish and check the exit code
@@ -982,6 +1030,8 @@ public abstract class Shell {
         LOG.warn("Error while closing the error stream", ioe);
       }
       process.destroy();
+      waitingThread = null;
+      CHILD_SHELLS.remove(this);
       lastTime = Time.monotonicNow();
     }
   }
@@ -1029,6 +1079,15 @@ public abstract class Shell {
     return exitCode;
   }
 
+  /** get the thread that is waiting on this instance of <code>Shell</code>.
+   * @return the thread that ran runCommand() that spawned this shell
+   * or null if no thread is waiting for this shell to complete
+   */
+  public Thread getWaitingThread() {
+    return waitingThread;
+  }
+
+
   /**
    * This is an IOException with exit code added.
    */
@@ -1069,13 +1128,13 @@ public abstract class Shell {
 
   /**
    * A simple shell command executor.
-   * 
+   *
    * <code>ShellCommandExecutor</code>should be used in cases where the output
    * of the command needs no explicit parsing and where the command, working
    * directory and the environment remains unchanged. The output of the command
    * is stored as-is and is expected to be small.
    */
-  public static class ShellCommandExecutor extends Shell 
+  public static class ShellCommandExecutor extends Shell
       implements CommandExecutor {
 
     private String[] command;
@@ -1102,7 +1161,7 @@ public abstract class Shell {
 
     /**
      * Create a new instance of the ShellCommandExecutor to execute a command.
-     * 
+     *
      * @param execString The command to execute with arguments
      * @param dir If not-null, specifies the directory which should be set
      *            as the current working directory for the command.
@@ -1116,7 +1175,7 @@ public abstract class Shell {
      * @param inheritParentEnv Indicates if the process should inherit the env
      *                         vars from the parent process or not.
      */
-    public ShellCommandExecutor(String[] execString, File dir, 
+    public ShellCommandExecutor(String[] execString, File dir,
         Map<String, String> env, long timeout, boolean inheritParentEnv) {
       command = execString.clone();
       if (dir != null) {
@@ -1127,6 +1186,15 @@ public abstract class Shell {
       }
       timeOutInterval = timeout;
       this.inheritParentEnv = inheritParentEnv;
+    }
+
+    /**
+     * Returns the timeout value set for the executor's sub-commands.
+     * @return The timeout value in seconds
+     */
+    @VisibleForTesting
+    public long getTimeoutInterval() {
+      return timeOutInterval;
     }
 
     /**
@@ -1141,7 +1209,7 @@ public abstract class Shell {
               + StringUtils.join(" ", command));
         }
       }
-      this.run();    
+      this.run();
     }
 
     @Override
@@ -1194,7 +1262,7 @@ public abstract class Shell {
   /**
    * To check if the passed script to shell command executor timed out or
    * not.
-   * 
+   *
    * @return if the script timed out.
    */
   public boolean isTimedOut() {
@@ -1203,15 +1271,15 @@ public abstract class Shell {
 
   /**
    * Declare that the command has timed out.
-   * 
+   *
    */
   private void setTimedOut() {
     this.timedOut.set(true);
   }
 
-  /** 
-   * Static method to execute a shell command. 
-   * Covers most of the simple cases without requiring the user to implement  
+  /**
+   * Static method to execute a shell command.
+   * Covers most of the simple cases without requiring the user to implement
    * the <code>Shell</code> interface.
    * @param cmd shell command to execute.
    * @return the output of the executed command.
@@ -1233,7 +1301,7 @@ public abstract class Shell {
 
   public static String execCommand(Map<String, String> env, String[] cmd,
       long timeout) throws IOException {
-    ShellCommandExecutor exec = new ShellCommandExecutor(cmd, null, env, 
+    ShellCommandExecutor exec = new ShellCommandExecutor(cmd, null, env,
                                                           timeout);
     exec.execute();
     return exec.getOutput();
@@ -1271,13 +1339,38 @@ public abstract class Shell {
         p.exitValue();
       } catch (Exception e) {
         //Process has not terminated.
-        //So check if it has completed 
+        //So check if it has completed
         //if not just destroy it.
         if (p != null && !shell.completed.get()) {
           shell.setTimedOut();
           p.destroy();
         }
       }
+    }
+  }
+
+  /**
+   * Static method to destroy all running <code>Shell</code> processes.
+   * Iterates through a map of all currently running <code>Shell</code>
+   * processes and destroys them one by one. This method is thread safe
+   */
+  public static void destroyAllShellProcesses() {
+    synchronized (CHILD_SHELLS) {
+      for (Shell shell : CHILD_SHELLS.keySet()) {
+        if (shell.getProcess() != null) {
+          shell.getProcess().destroy();
+        }
+      }
+      CHILD_SHELLS.clear();
+    }
+  }
+
+  /**
+   * Static method to return a Set of all <code>Shell</code> objects.
+   */
+  public static Set<Shell> getAllShells() {
+    synchronized (CHILD_SHELLS) {
+      return new HashSet<>(CHILD_SHELLS.keySet());
     }
   }
 }

@@ -18,11 +18,16 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager;
 
+import com.google.common.base.Supplier;
+import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.yarn.event.DrainDispatcher;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairSchedulerConfiguration;
 import org.junit.Before;
 import static org.mockito.Matchers.argThat;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.spy;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -56,8 +61,8 @@ import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.AbstractEvent;
-import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.event.Dispatcher;
+import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEvent;
@@ -69,6 +74,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptE
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
 import org.apache.log4j.Level;
 import org.apache.log4j.LogManager;
@@ -84,6 +90,10 @@ public class TestRM extends ParameterizedSchedulerTestBase {
   private final static int WAIT_SLEEP_MS = 100;
 
   private YarnConfiguration conf;
+
+  public TestRM(SchedulerType type) throws IOException {
+    super(type);
+  }
 
   @Before
   public void setup() {
@@ -136,7 +146,7 @@ public class TestRM extends ParameterizedSchedulerTestBase {
   public void testAppOnMultiNode() throws Exception {
     Logger rootLogger = LogManager.getRootLogger();
     rootLogger.setLevel(Level.DEBUG);
-    conf.set("yarn.scheduler.capacity.node-locality-delay", "-1");
+    conf.set(CapacitySchedulerConfiguration.NODE_LOCALITY_DELAY, "-1");
     MockRM rm = new MockRM(conf);
     rm.start();
     MockNM nm1 = rm.registerNode("h1:1234", 5120);
@@ -558,9 +568,9 @@ public class TestRM extends ParameterizedSchedulerTestBase {
   @Test (timeout = 60000)
   public void testApplicationKillAtAcceptedState() throws Exception {
 
-    final Dispatcher dispatcher = new AsyncDispatcher() {
+    final Dispatcher dispatcher = new DrainDispatcher() {
       @Override
-      public EventHandler getEventHandler() {
+      public EventHandler<Event> getEventHandler() {
 
         class EventArgMatcher extends ArgumentMatcher<AbstractEvent> {
           @Override
@@ -629,7 +639,13 @@ public class TestRM extends ParameterizedSchedulerTestBase {
     rm.waitForState(application.getApplicationId(), RMAppState.KILLED);
 
     // test metrics
-    metrics = rm.getResourceScheduler().getRootQueueMetrics();
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return appsKilled + 1 == metrics.getAppsKilled()
+            && appsSubmitted + 1 == metrics.getAppsSubmitted();
+      }
+    }, 100, 10000);
     Assert.assertEquals(appsKilled + 1, metrics.getAppsKilled());
     Assert.assertEquals(appsSubmitted + 1, metrics.getAppsSubmitted());
   }
@@ -639,9 +655,9 @@ public class TestRM extends ParameterizedSchedulerTestBase {
   public void testKillFinishingApp() throws Exception{
 
     // this dispatcher ignores RMAppAttemptEventType.KILL event
-    final Dispatcher dispatcher = new AsyncDispatcher() {
+    final Dispatcher dispatcher = new DrainDispatcher() {
       @Override
-      public EventHandler getEventHandler() {
+      public EventHandler<Event> getEventHandler() {
 
         class EventArgMatcher extends ArgumentMatcher<AbstractEvent> {
           @Override
@@ -693,9 +709,9 @@ public class TestRM extends ParameterizedSchedulerTestBase {
   public void testKillFailingApp() throws Exception{
 
     // this dispatcher ignores RMAppAttemptEventType.KILL event
-    final Dispatcher dispatcher = new AsyncDispatcher() {
+    final Dispatcher dispatcher = new DrainDispatcher() {
       @Override
-      public EventHandler getEventHandler() {
+      public EventHandler<Event> getEventHandler() {
 
         class EventArgMatcher extends ArgumentMatcher<AbstractEvent> {
           @Override

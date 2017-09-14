@@ -17,16 +17,25 @@
  */
 package org.apache.hadoop.hdfs;
 
+import static org.junit.Assert.assertFalse;
+
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StreamCapabilities.StreamCapability;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
+import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.io.erasurecode.CodecUtil;
+import org.apache.hadoop.io.erasurecode.ErasureCodeNative;
+import org.apache.hadoop.io.erasurecode.rawcoder.NativeRSRawErasureCoderFactory;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.log4j.Level;
 import org.junit.After;
@@ -44,30 +53,51 @@ public class TestDFSStripedOutputStream {
     GenericTestUtils.setLogLevel(DataStreamer.LOG, Level.ALL);
   }
 
-  private int dataBlocks = StripedFileTestUtil.NUM_DATA_BLOCKS;
-  private int parityBlocks = StripedFileTestUtil.NUM_PARITY_BLOCKS;
+  private ErasureCodingPolicy ecPolicy;
+  private int dataBlocks;
+  private int parityBlocks;
 
   private MiniDFSCluster cluster;
   private DistributedFileSystem fs;
   private Configuration conf;
-  private final int cellSize = StripedFileTestUtil.BLOCK_STRIPED_CELL_SIZE;
+  private int cellSize;
   private final int stripesPerBlock = 4;
-  private final int blockSize = cellSize * stripesPerBlock;
+  private int blockSize;
 
   @Rule
   public Timeout globalTimeout = new Timeout(300000);
 
+  public ErasureCodingPolicy getEcPolicy() {
+    return StripedFileTestUtil.getDefaultECPolicy();
+  }
+
   @Before
   public void setup() throws IOException {
+    /*
+     * Initialize erasure coding policy.
+     */
+    ecPolicy = getEcPolicy();
+    dataBlocks = (short) ecPolicy.getNumDataUnits();
+    parityBlocks = (short) ecPolicy.getNumParityUnits();
+    cellSize = ecPolicy.getCellSize();
+    blockSize = stripesPerBlock * cellSize;
+    System.out.println("EC policy = " + ecPolicy);
+
     int numDNs = dataBlocks + parityBlocks + 2;
     conf = new Configuration();
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
-    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_REPLICATION_CONSIDERLOAD_KEY,
+    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_CONSIDERLOAD_KEY,
         false);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_MAX_STREAMS_KEY, 0);
+    if (ErasureCodeNative.isNativeCodeLoaded()) {
+      conf.set(
+          CodecUtil.IO_ERASURECODE_CODEC_RS_RAWCODERS_KEY,
+          NativeRSRawErasureCoderFactory.CODER_NAME);
+    }
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDNs).build();
-    cluster.getFileSystem().getClient().setErasureCodingPolicy("/", null);
     fs = cluster.getFileSystem();
+    DFSTestUtil.enableAllECPolicies(fs);
+    fs.getClient().setErasureCodingPolicy("/", ecPolicy.getName());
   }
 
   @After
@@ -146,12 +176,38 @@ public class TestDFSStripedOutputStream {
         blockSize * dataBlocks + cellSize+ 123);
   }
 
-
   @Test
   public void testFileMoreThanABlockGroup3() throws Exception {
     testOneFile("/MoreThanABlockGroup3",
         blockSize * dataBlocks * 3 + cellSize * dataBlocks
         + cellSize + 123);
+  }
+
+  /**
+   * {@link DFSStripedOutputStream} doesn't support hflush() or hsync() yet.
+   * This test is to make sure that DFSStripedOutputStream doesn't throw any
+   * {@link UnsupportedOperationException} on hflush() or hsync() so as to
+   * comply with output stream spec.
+   *
+   * @throws Exception
+   */
+  @Test
+  public void testStreamFlush() throws Exception {
+    final byte[] bytes = StripedFileTestUtil.generateBytes(blockSize *
+        dataBlocks * 3 + cellSize * dataBlocks + cellSize + 123);
+    FSDataOutputStream os = fs.create(new Path("/ec-file-1"));
+    assertFalse("DFSStripedOutputStream should not have hflush() " +
+            "capability yet!", os.hasCapability(
+                StreamCapability.HFLUSH.getValue()));
+    assertFalse("DFSStripedOutputStream should not have hsync() " +
+            "capability yet!", os.hasCapability(
+                StreamCapability.HSYNC.getValue()));
+    InputStream is = new ByteArrayInputStream(bytes);
+    IOUtils.copyBytes(is, os, bytes.length);
+    os.hflush();
+    IOUtils.copyBytes(is, os, bytes.length);
+    os.hsync();
+    os.close();
   }
 
   private void testOneFile(String src, int writeBytes) throws Exception {
@@ -163,6 +219,6 @@ public class TestDFSStripedOutputStream {
     StripedFileTestUtil.waitBlockGroupsReported(fs, src);
 
     StripedFileTestUtil.checkData(fs, testPath, writeBytes,
-        new ArrayList<DatanodeInfo>(), null);
+        new ArrayList<DatanodeInfo>(), null, blockSize * dataBlocks);
   }
 }

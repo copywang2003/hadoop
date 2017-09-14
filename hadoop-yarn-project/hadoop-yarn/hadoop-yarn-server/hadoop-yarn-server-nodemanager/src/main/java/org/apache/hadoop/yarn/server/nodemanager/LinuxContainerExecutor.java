@@ -20,8 +20,8 @@ package org.apache.hadoop.yarn.server.nodemanager;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -30,6 +30,7 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ConfigurationException;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerDiagnosticsUpdateEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.privileged.PrivilegedOperation;
@@ -38,12 +39,15 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.privileg
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.resources.ResourceHandler;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.resources.ResourceHandlerException;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.resources.ResourceHandlerModule;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.DefaultLinuxContainerRuntime;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.DelegatingLinuxContainerRuntime;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.DockerLinuxContainerRuntime;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.LinuxContainerRuntime;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ContainerLocalizer;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerExecutionException;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.runtime.ContainerRuntimeContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerLivenessContext;
+import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerPrepareContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerReacquisitionContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerSignalContext;
 import org.apache.hadoop.yarn.server.nodemanager.executor.ContainerStartContext;
@@ -52,28 +56,50 @@ import org.apache.hadoop.yarn.server.nodemanager.executor.LocalizerStartContext;
 import org.apache.hadoop.yarn.server.nodemanager.util.CgroupsLCEResourcesHandler;
 import org.apache.hadoop.yarn.server.nodemanager.util.DefaultLCEResourcesHandler;
 import org.apache.hadoop.yarn.server.nodemanager.util.LCEResourcesHandler;
-import org.apache.hadoop.yarn.util.ConverterUtils;
-
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Pattern;
 
 import static org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.LinuxContainerRuntimeConstants.*;
 
-/** Container execution for Linux. Provides linux-specific localization
- * mechanisms, resource management via cgroups and can switch between multiple
- * container runtimes - e.g Standard "Process Tree", Docker etc
+/**
+ * <p>This class provides {@link Container} execution using a native
+ * {@code container-executor} binary. By using a helper written it native code,
+ * this class is able to do several things that the
+ * {@link DefaultContainerExecutor} cannot, such as execution of applications
+ * as the applications' owners, provide localization that takes advantage of
+ * mapping the application owner to a UID on the execution host, resource
+ * management through Linux CGROUPS, and Docker support.</p>
+ *
+ * <p>If {@code hadoop.security.authetication} is set to {@code simple},
+ * then the
+ * {@code yarn.nodemanager.linux-container-executor.nonsecure-mode.limit-users}
+ * property will determine whether the {@code LinuxContainerExecutor} runs
+ * processes as the application owner or as the default user, as set in the
+ * {@code yarn.nodemanager.linux-container-executor.nonsecure-mode.local-user}
+ * property.</p>
+ *
+ * <p>The {@code LinuxContainerExecutor} will manage applications through an
+ * appropriate {@link LinuxContainerRuntime} instance. This class uses a
+ * {@link DelegatingLinuxContainerRuntime} instance, which will delegate calls
+ * to either a {@link DefaultLinuxContainerRuntime} instance or a
+ * {@link DockerLinuxContainerRuntime} instance, depending on the job's
+ * configuration.</p>
+ *
+ * @see LinuxContainerRuntime
+ * @see DelegatingLinuxContainerRuntime
+ * @see DefaultLinuxContainerRuntime
+ * @see DockerLinuxContainerRuntime
+ * @see DockerLinuxContainerRuntime#isDockerContainerRequested
  */
-
 public class LinuxContainerExecutor extends ContainerExecutor {
 
-  private static final Log LOG = LogFactory
-      .getLog(LinuxContainerExecutor.class);
+  private static final Logger LOG =
+       LoggerFactory.getLogger(LinuxContainerExecutor.class);
 
   private String nonsecureLocalUser;
   private Pattern nonsecureLocalUserPattern;
@@ -84,10 +110,70 @@ public class LinuxContainerExecutor extends ContainerExecutor {
   private ResourceHandler resourceHandlerChain;
   private LinuxContainerRuntime linuxContainerRuntime;
 
+  /**
+   * The container exit code.
+   */
+  public enum ExitCode {
+    SUCCESS(0),
+    INVALID_ARGUMENT_NUMBER(1),
+    INVALID_COMMAND_PROVIDED(3),
+    INVALID_NM_ROOT_DIRS(5),
+    SETUID_OPER_FAILED(6),
+    UNABLE_TO_EXECUTE_CONTAINER_SCRIPT(7),
+    UNABLE_TO_SIGNAL_CONTAINER(8),
+    INVALID_CONTAINER_PID(9),
+    OUT_OF_MEMORY(18),
+    INITIALIZE_USER_FAILED(20),
+    PATH_TO_DELETE_IS_NULL(21),
+    INVALID_CONTAINER_EXEC_PERMISSIONS(22),
+    INVALID_CONFIG_FILE(24),
+    SETSID_OPER_FAILED(25),
+    WRITE_PIDFILE_FAILED(26),
+    WRITE_CGROUP_FAILED(27),
+    TRAFFIC_CONTROL_EXECUTION_FAILED(28),
+    DOCKER_RUN_FAILED(29),
+    ERROR_OPENING_DOCKER_FILE(30),
+    ERROR_READING_DOCKER_FILE(31),
+    FEATURE_DISABLED(32),
+    COULD_NOT_CREATE_SCRIPT_COPY(33),
+    COULD_NOT_CREATE_CREDENTIALS_FILE(34),
+    COULD_NOT_CREATE_WORK_DIRECTORIES(35),
+    COULD_NOT_CREATE_APP_LOG_DIRECTORIES(36),
+    COULD_NOT_CREATE_TMP_DIRECTORIES(37),
+    ERROR_CREATE_CONTAINER_DIRECTORIES_ARGUMENTS(38);
+
+    private final int code;
+
+    ExitCode(int exitCode) {
+      this.code = exitCode;
+    }
+
+    /**
+     * Get the exit code as an int.
+     * @return the exit code as an int
+     */
+    public int getExitCode() {
+      return code;
+    }
+
+    @Override
+    public String toString() {
+      return String.valueOf(code);
+    }
+  }
+
+  /**
+   * Default constructor to allow for creation through reflection.
+   */
   public LinuxContainerExecutor() {
   }
 
-  // created primarily for testing
+  /**
+   * Create a LinuxContainerExecutor with a provided
+   * {@link LinuxContainerRuntime}.  Used primarily for testing.
+   *
+   * @param linuxContainerRuntime the runtime to use
+   */
   public LinuxContainerExecutor(LinuxContainerRuntime linuxContainerRuntime) {
     this.linuxContainerRuntime = linuxContainerRuntime;
   }
@@ -98,6 +184,7 @@ public class LinuxContainerExecutor extends ContainerExecutor {
 
     resourcesHandler = getResourcesHandler(conf);
 
+    containerSchedPriorityIsSet = false;
     if (conf.get(YarnConfiguration.NM_CONTAINER_EXECUTOR_SCHED_PRIORITY)
         != null) {
       containerSchedPriorityIsSet = true;
@@ -154,6 +241,13 @@ public class LinuxContainerExecutor extends ContainerExecutor {
     }
   }
 
+  /**
+   * Get the path to the {@code container-executor} binary. The path will
+   * be absolute.
+   *
+   * @param conf the {@link Configuration}
+   * @return the path to the {@code container-executor} binary
+   */
   protected String getContainerExecutorExecutablePath(Configuration conf) {
     String yarnHomeEnvVar =
         System.getenv(ApplicationConstants.Environment.HADOOP_YARN_HOME.key());
@@ -166,11 +260,23 @@ public class LinuxContainerExecutor extends ContainerExecutor {
         defaultPath);
   }
 
+  /**
+   * Add a niceness level to the process that will be executed.  Adds
+   * {@code -n <nice>} to the given command. The niceness level will be
+   * taken from the
+   * {@code yarn.nodemanager.container-executer.os.sched.prioity} property.
+   *
+   * @param command the command to which to add the niceness setting.
+   */
   protected void addSchedPriorityCommand(List<String> command) {
     if (containerSchedPriorityIsSet) {
       command.addAll(Arrays.asList("nice", "-n",
           Integer.toString(containerSchedPriorityAdjustment)));
     }
+  }
+
+  protected PrivilegedOperationExecutor getPrivilegedOperationExecutor() {
+    return PrivilegedOperationExecutor.getInstance(getConf());
   }
 
   @Override
@@ -183,7 +289,7 @@ public class LinuxContainerExecutor extends ContainerExecutor {
       PrivilegedOperation checkSetupOp = new PrivilegedOperation(
           PrivilegedOperation.OperationType.CHECK_SETUP);
       PrivilegedOperationExecutor privilegedOperationExecutor =
-          PrivilegedOperationExecutor.getInstance(conf);
+          getPrivilegedOperationExecutor();
 
       privilegedOperationExecutor.executePrivilegedOperation(checkSetupOp,
           false);
@@ -201,7 +307,7 @@ public class LinuxContainerExecutor extends ContainerExecutor {
           .getConfiguredResourceHandlerChain(conf);
       if (LOG.isDebugEnabled()) {
         LOG.debug("Resource handler chain enabled = " + (resourceHandlerChain
-            == null));
+            != null));
       }
       if (resourceHandlerChain != null) {
         LOG.debug("Bootstrapping resource handler chain");
@@ -221,6 +327,7 @@ public class LinuxContainerExecutor extends ContainerExecutor {
         this.linuxContainerRuntime = runtime;
       }
     } catch (ContainerExecutionException e) {
+      LOG.error("Failed to initialize linux container runtime(s)!", e);
       throw new IOException("Failed to initialize linux container runtime(s)!");
     }
 
@@ -279,7 +386,7 @@ public class LinuxContainerExecutor extends ContainerExecutor {
     try {
       Configuration conf = super.getConf();
       PrivilegedOperationExecutor privilegedOperationExecutor =
-          PrivilegedOperationExecutor.getInstance(conf);
+          getPrivilegedOperationExecutor();
 
       privilegedOperationExecutor.executePrivilegedOperation(prefixCommands,
           initializeContainerOp, null, null, false, true);
@@ -294,6 +401,17 @@ public class LinuxContainerExecutor extends ContainerExecutor {
     }
   }
 
+  /**
+   * Set up the {@link ContainerLocalizer}.
+   *
+   * @param command the current ShellCommandExecutor command line
+   * @param user localization user
+   * @param appId localized app id
+   * @param locId localizer id
+   * @param nmAddr nodemanager address
+   * @param localDirs list of local dirs
+   * @see ContainerLocalizer#buildMainArgs
+   */
   @VisibleForTesting
   public void buildMainArgs(List<String> command, String user, String appId,
       String locId, InetSocketAddress nmAddr, List<String> localDirs) {
@@ -302,29 +420,40 @@ public class LinuxContainerExecutor extends ContainerExecutor {
   }
 
   @Override
-  public int launchContainer(ContainerStartContext ctx) throws IOException {
+  public void prepareContainer(ContainerPrepareContext ctx) throws IOException {
+
+    ContainerRuntimeContext.Builder builder =
+        new ContainerRuntimeContext.Builder(ctx.getContainer());
+
+    builder.setExecutionAttribute(LOCALIZED_RESOURCES,
+            ctx.getLocalizedResources())
+        .setExecutionAttribute(USER, ctx.getUser())
+        .setExecutionAttribute(CONTAINER_LOCAL_DIRS,
+            ctx.getContainerLocalDirs())
+        .setExecutionAttribute(CONTAINER_RUN_CMDS, ctx.getCommands())
+        .setExecutionAttribute(CONTAINER_ID_STR,
+            ctx.getContainer().getContainerId().toString());
+
+    try {
+      linuxContainerRuntime.prepareContainer(builder.build());
+    } catch (ContainerExecutionException e) {
+      throw new IOException("Unable to prepare container: ", e);
+    }
+  }
+
+  @Override
+  public int launchContainer(ContainerStartContext ctx)
+      throws IOException, ConfigurationException {
     Container container = ctx.getContainer();
-    Path nmPrivateContainerScriptPath = ctx.getNmPrivateContainerScriptPath();
-    Path nmPrivateTokensPath = ctx.getNmPrivateTokensPath();
     String user = ctx.getUser();
-    String appId = ctx.getAppId();
-    Path containerWorkDir = ctx.getContainerWorkDir();
-    List<String> localDirs = ctx.getLocalDirs();
-    List<String> logDirs = ctx.getLogDirs();
-    List<String> containerLocalDirs = ctx.getContainerLocalDirs();
-    List<String> containerLogDirs = ctx.getContainerLogDirs();
-    Map<Path, List<String>> localizedResources = ctx.getLocalizedResources();
 
     verifyUsernamePattern(user);
-    String runAsUser = getRunAsUser(user);
 
     ContainerId containerId = container.getContainerId();
-    String containerIdStr = containerId.toString();
 
     resourcesHandler.preExecute(containerId,
             container.getResource());
-    String resourcesOptions = resourcesHandler.getResourcesOption(
-            containerId);
+    String resourcesOptions = resourcesHandler.getResourcesOption(containerId);
     String tcCommandFile = null;
 
     try {
@@ -375,41 +504,15 @@ public class LinuxContainerExecutor extends ContainerExecutor {
     try {
       Path pidFilePath = getPidFilePath(containerId);
       if (pidFilePath != null) {
-        List<String> prefixCommands = new ArrayList<>();
-        ContainerRuntimeContext.Builder builder = new ContainerRuntimeContext
-            .Builder(container);
 
-        addSchedPriorityCommand(prefixCommands);
-        if (prefixCommands.size() > 0) {
-          builder.setExecutionAttribute(CONTAINER_LAUNCH_PREFIX_COMMANDS,
-              prefixCommands);
-        }
+        ContainerRuntimeContext runtimeContext = buildContainerRuntimeContext(
+            ctx, pidFilePath, resourcesOptions, tcCommandFile);
 
-        builder.setExecutionAttribute(LOCALIZED_RESOURCES, localizedResources)
-            .setExecutionAttribute(RUN_AS_USER, runAsUser)
-            .setExecutionAttribute(USER, user)
-            .setExecutionAttribute(APPID, appId)
-            .setExecutionAttribute(CONTAINER_ID_STR, containerIdStr)
-            .setExecutionAttribute(CONTAINER_WORK_DIR, containerWorkDir)
-            .setExecutionAttribute(NM_PRIVATE_CONTAINER_SCRIPT_PATH,
-                nmPrivateContainerScriptPath)
-            .setExecutionAttribute(NM_PRIVATE_TOKENS_PATH, nmPrivateTokensPath)
-            .setExecutionAttribute(PID_FILE_PATH, pidFilePath)
-            .setExecutionAttribute(LOCAL_DIRS, localDirs)
-            .setExecutionAttribute(LOG_DIRS, logDirs)
-            .setExecutionAttribute(CONTAINER_LOCAL_DIRS, containerLocalDirs)
-            .setExecutionAttribute(CONTAINER_LOG_DIRS, containerLogDirs)
-            .setExecutionAttribute(RESOURCES_OPTIONS, resourcesOptions);
-
-        if (tcCommandFile != null) {
-          builder.setExecutionAttribute(TC_COMMAND_FILE, tcCommandFile);
-        }
-
-        linuxContainerRuntime.launchContainer(builder.build());
+        linuxContainerRuntime.launchContainer(runtimeContext);
       } else {
         LOG.info(
             "Container was marked as inactive. Returning terminated error");
-        return ExitCode.TERMINATED.getExitCode();
+        return ContainerExecutor.ExitCode.TERMINATED.getExitCode();
       }
     } catch (ContainerExecutionException e) {
       int exitCode = e.getExitCode();
@@ -417,8 +520,8 @@ public class LinuxContainerExecutor extends ContainerExecutor {
       // 143 (SIGTERM) and 137 (SIGKILL) exit codes means the container was
       // terminated/killed forcefully. In all other cases, log the
       // output
-      if (exitCode != ExitCode.FORCE_KILLED.getExitCode()
-          && exitCode != ExitCode.TERMINATED.getExitCode()) {
+      if (exitCode != ContainerExecutor.ExitCode.FORCE_KILLED.getExitCode()
+          && exitCode != ContainerExecutor.ExitCode.TERMINATED.getExitCode()) {
         LOG.warn("Exception from container-launch with container ID: "
             + containerId + " and exit code: " + exitCode, e);
 
@@ -431,13 +534,31 @@ public class LinuxContainerExecutor extends ContainerExecutor {
         }
         builder.append("Stack trace: "
             + StringUtils.stringifyException(e) + "\n");
-        if (!e.getOutput().isEmpty()) {
-          builder.append("Shell output: " + e.getOutput() + "\n");
+        String output = e.getOutput();
+        if (output != null && !e.getOutput().isEmpty()) {
+          builder.append("Shell output: " + output + "\n");
         }
         String diagnostics = builder.toString();
         logOutput(diagnostics);
         container.handle(new ContainerDiagnosticsUpdateEvent(containerId,
             diagnostics));
+        if (exitCode ==
+                ExitCode.INVALID_CONTAINER_EXEC_PERMISSIONS.getExitCode() ||
+            exitCode ==
+                ExitCode.INVALID_CONFIG_FILE.getExitCode() ||
+            exitCode ==
+                ExitCode.COULD_NOT_CREATE_SCRIPT_COPY.getExitCode() ||
+            exitCode ==
+                ExitCode.COULD_NOT_CREATE_CREDENTIALS_FILE.getExitCode() ||
+            exitCode ==
+                ExitCode.COULD_NOT_CREATE_WORK_DIRECTORIES.getExitCode() ||
+            exitCode ==
+                ExitCode.COULD_NOT_CREATE_APP_LOG_DIRECTORIES.getExitCode() ||
+            exitCode ==
+                ExitCode.COULD_NOT_CREATE_TMP_DIRECTORIES.getExitCode()) {
+          throw new ConfigurationException(
+              "Linux Container Executor reached unrecoverable exception", e);
+        }
       } else {
         container.handle(new ContainerDiagnosticsUpdateEvent(containerId,
             "Container killed on request. Exit code is " + exitCode));
@@ -457,6 +578,56 @@ public class LinuxContainerExecutor extends ContainerExecutor {
     }
 
     return 0;
+  }
+
+  private ContainerRuntimeContext buildContainerRuntimeContext(
+      ContainerStartContext ctx, Path pidFilePath,
+      String resourcesOptions, String tcCommandFile) {
+
+    List<String> prefixCommands = new ArrayList<>();
+    addSchedPriorityCommand(prefixCommands);
+
+    Container container = ctx.getContainer();
+
+    ContainerRuntimeContext.Builder builder = new ContainerRuntimeContext
+            .Builder(container);
+    if (prefixCommands.size() > 0) {
+      builder.setExecutionAttribute(CONTAINER_LAUNCH_PREFIX_COMMANDS,
+              prefixCommands);
+    }
+
+    builder.setExecutionAttribute(LOCALIZED_RESOURCES,
+        ctx.getLocalizedResources())
+      .setExecutionAttribute(RUN_AS_USER, getRunAsUser(ctx.getUser()))
+      .setExecutionAttribute(USER, ctx.getUser())
+      .setExecutionAttribute(APPID, ctx.getAppId())
+      .setExecutionAttribute(CONTAINER_ID_STR,
+        container.getContainerId().toString())
+      .setExecutionAttribute(CONTAINER_WORK_DIR, ctx.getContainerWorkDir())
+      .setExecutionAttribute(NM_PRIVATE_CONTAINER_SCRIPT_PATH,
+        ctx.getNmPrivateContainerScriptPath())
+      .setExecutionAttribute(NM_PRIVATE_TOKENS_PATH,
+        ctx.getNmPrivateTokensPath())
+      .setExecutionAttribute(PID_FILE_PATH, pidFilePath)
+      .setExecutionAttribute(LOCAL_DIRS, ctx.getLocalDirs())
+      .setExecutionAttribute(LOG_DIRS, ctx.getLogDirs())
+      .setExecutionAttribute(FILECACHE_DIRS, ctx.getFilecacheDirs())
+      .setExecutionAttribute(USER_LOCAL_DIRS, ctx.getUserLocalDirs())
+      .setExecutionAttribute(CONTAINER_LOCAL_DIRS, ctx.getContainerLocalDirs())
+      .setExecutionAttribute(CONTAINER_LOG_DIRS, ctx.getContainerLogDirs())
+      .setExecutionAttribute(RESOURCES_OPTIONS, resourcesOptions);
+
+    if (tcCommandFile != null) {
+      builder.setExecutionAttribute(TC_COMMAND_FILE, tcCommandFile);
+    }
+
+    return builder.build();
+  }
+
+  @Override
+  public String[] getIpAndHost(Container container)
+      throws ContainerExecutionException {
+    return linuxContainerRuntime.getIpAndHost(container);
   }
 
   @Override
@@ -564,7 +735,7 @@ public class LinuxContainerExecutor extends ContainerExecutor {
     try {
       Configuration conf = super.getConf();
       PrivilegedOperationExecutor privilegedOperationExecutor =
-          PrivilegedOperationExecutor.getInstance(conf);
+          getPrivilegedOperationExecutor();
 
       privilegedOperationExecutor.executePrivilegedOperation(deleteAsUserOp,
           false);
@@ -573,6 +744,50 @@ public class LinuxContainerExecutor extends ContainerExecutor {
       LOG.error("DeleteAsUser for " + StringUtils.join(" ", pathsToDelete)
           + " returned with exit code: " + exitCode, e);
     }
+  }
+
+  @Override
+  protected File[] readDirAsUser(String user, Path dir) {
+    List<File> files = new ArrayList<>();
+    PrivilegedOperation listAsUserOp = new PrivilegedOperation(
+        PrivilegedOperation.OperationType.LIST_AS_USER, (String)null);
+    String runAsUser = getRunAsUser(user);
+    String dirString = "";
+
+    if (dir != null) {
+      dirString = dir.toUri().getPath();
+    }
+
+    listAsUserOp.appendArgs(runAsUser, user,
+        Integer.toString(
+            PrivilegedOperation.RunAsUserCommand.LIST_AS_USER.getValue()),
+        dirString);
+
+    try {
+      PrivilegedOperationExecutor privOpExecutor =
+          getPrivilegedOperationExecutor();
+
+      String results =
+          privOpExecutor.executePrivilegedOperation(listAsUserOp, true);
+
+      for (String file: results.split("\n")) {
+        // The container-executor always dumps its log output to stdout, which
+        // includes 3 lines that start with "main : "
+        if (!file.startsWith("main :")) {
+          files.add(new File(new File(dirString), file));
+        }
+      }
+    } catch (PrivilegedOperationException e) {
+      LOG.error("ListAsUser for " + dir + " returned with exit code: "
+          + e.getExitCode(), e);
+    }
+
+    return files.toArray(new File[files.size()]);
+  }
+
+  @Override
+  public void symLink(String target, String symlink) {
+
   }
 
   @Override
@@ -591,6 +806,15 @@ public class LinuxContainerExecutor extends ContainerExecutor {
         .build());
   }
 
+  /**
+   * Mount a CGROUPS controller at the requested mount point and create
+   * a hierarchy for the NodeManager to manage.
+   *
+   * @param cgroupKVs a key-value pair of the form
+   * {@code controller=mount-path}
+   * @param hierarchy the top directory of the hierarchy for the NodeManager
+   * @throws IOException if there is a problem mounting the CGROUPS
+   */
   public void mountCgroups(List<String> cgroupKVs, String hierarchy)
       throws IOException {
     try {
@@ -600,7 +824,7 @@ public class LinuxContainerExecutor extends ContainerExecutor {
 
       mountCGroupsOp.appendArgs(cgroupKVs);
       PrivilegedOperationExecutor privilegedOperationExecutor =
-          PrivilegedOperationExecutor.getInstance(conf);
+          getPrivilegedOperationExecutor();
 
       privilegedOperationExecutor.executePrivilegedOperation(mountCGroupsOp,
           false);

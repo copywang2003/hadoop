@@ -96,12 +96,15 @@ In summary, first, provision the credentials into a provider then configure the 
 ##### Supported Features
 | Feature\Component | Description | Link |
 |:---- |:---- |:---|
-|LDAPGroupsMapping    |LDAPGroupsMapping is used to look up the groups for a given user in LDAP. The CredentialProvider API is used to protect the LDAP bind password and those needed for SSL.|TODO|
+|LDAPGroupsMapping    |LDAPGroupsMapping is used to look up the groups for a given user in LDAP. The CredentialProvider API is used to protect the LDAP bind password and those needed for SSL.|[LDAP Groups Mapping](GroupsMapping.html#LDAP_Groups_Mapping)|
 |SSL Passwords        |FileBasedKeyStoresFactory leverages the credential provider API in order to resolve the SSL related passwords.|TODO|
 |HDFS                 |DFSUtil leverages Configuration.getPassword method to use the credential provider API and/or fallback to the clear text value stored in ssl-server.xml.|TODO|
 |YARN                 |WebAppUtils uptakes the use of the credential provider API through the new method on Configuration called getPassword. This provides an alternative to storing the passwords in clear text within the ssl-server.xml file while maintaining backward compatibility.|TODO|
+|KMS                  |Uses HttpServer2.loadSSLConfiguration that leverages Configuration.getPassword to read SSL related credentials. They may be resolved through Credential Provider and/or from the clear text in the config when allowed.|[KMS](../../hadoop-kms/index.html)|
+|HttpFS               |Uses HttpServer2.loadSSLConfiguration that leverages Configuration.getPassword to read SSL related credentials. They may be resolved through Credential Provider and/or from the clear text in the  config when allowed.|[HttpFS Server Setup](../../hadoop-hdfs-httpfs/ServerSetup.html)|
 |AWS <br/> S3/S3A     |Uses Configuration.getPassword to get the S3 credentials. They may be resolved through the credential provider API or from the config for backward compatibility.|[AWS S3/S3A Usage](../../hadoop-aws/tools/hadoop-aws/index.html)|
 |Azure <br/> WASB     |Uses Configuration.getPassword to get the WASB credentials. They may be resolved through the credential provider API or from the config for backward compatibility.|[Azure WASB Usage](../../hadoop-azure/index.html)|
+|Azure <br/> ADLS     |Uses Configuration.getPassword to get the ADLS credentials. They may be resolved through the credential provider API or from the config for backward compatibility.|[Azure ADLS Usage](../../hadoop-azure-datalake/index.html)|
 |Apache <br/> Accumulo|The trace.password property is used by the Tracer to authenticate with Accumulo and persist the traces in the trace table. The credential provider API is used to acquire the trace.password from a provider or from configuration for backward compatibility.|TODO|
 |Apache <br/> Slider  |A capability has been added to Slider to prompt the user for needed passwords and store them using CredentialProvider so they can be retrieved by an app later.|TODO|
 |Apache <br/> Hive    |Protection of the metastore password, SSL related passwords and JDO string password has been added through the use of the Credential Provider API|TODO|
@@ -119,7 +122,7 @@ See the command options detail in the [Commands Manual](CommandsManual.html#cred
 
 Utilizing the credential command will often be for provisioning a password or secret to a particular credential store provider. In order to explicitly indicate which provider store to use the `-provider` option should be used.
 
-Example: `hadoop credential create ssl.server.keystore.password jceks://file/tmp/test.jceks`
+Example: `hadoop credential create ssl.server.keystore.password -provider jceks://file/tmp/test.jceks`
 
 In order to indicate a particular provider type and location, the user must provide the `hadoop.security.credential.provider.path` configuration element in core-site.xml or use the command line option `-provider` on each of the credential management commands. This provider path is a comma-separated list of URLs that indicates the type and location of a list of providers that should be consulted. For example, the following path: `user:///,jceks://file/tmp/test.jceks,jceks://hdfs@nn1.example.com/my/path/test.jceks` indicates that the current user's credentials file should be consulted through the User Provider, that the local file located at `/tmp/test.jceks` is a Java Keystore Provider and that the file located within HDFS at `nn1.example.com/my/path/test.jceks` is also a store for a Java Keystore Provider.
 

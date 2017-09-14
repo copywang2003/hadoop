@@ -20,31 +20,41 @@ package org.apache.hadoop.yarn.server.resourcemanager;
 
 import static java.lang.Thread.sleep;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.yarn.ams.ApplicationMasterServiceContext;
+import org.apache.hadoop.yarn.ams.ApplicationMasterServiceProcessor;
+import org.apache.hadoop.yarn.api.protocolrecords.AllocateRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.FinishApplicationMasterRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.FinishApplicationMasterResponse;
+import org.apache.hadoop.yarn.api.protocolrecords
+    .RegisterApplicationMasterRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.RegisterApplicationMasterResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.impl.pb.AllocateRequestPBImpl;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.ContainerResourceChangeRequest;
+import org.apache.hadoop.yarn.api.records.ContainerUpdateType;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.Priority;
+import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
+import org.apache.hadoop.yarn.api.records.UpdateContainerRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.event.Dispatcher;
-import org.apache.hadoop.yarn.event.DrainDispatcher;
 import org.apache.hadoop.yarn.exceptions.ApplicationMasterNotRegisteredException;
 import org.apache.hadoop.yarn.exceptions.InvalidContainerReleaseException;
-import org.apache.hadoop.yarn.exceptions.InvalidResourceRequestException;
+import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.proto.YarnServiceProtos.SchedulerResourceTypes;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
@@ -62,7 +72,7 @@ import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.resource.DominantResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.junit.Assert;
-import org.junit.BeforeClass;
+import org.junit.Before;
 import org.junit.Test;
 
 public class TestApplicationMasterService {
@@ -72,11 +82,161 @@ public class TestApplicationMasterService {
   private final int GB = 1024;
   private static YarnConfiguration conf;
 
-  @BeforeClass
-  public static void setup() {
+  private static AtomicInteger beforeRegCount = new AtomicInteger(0);
+  private static AtomicInteger afterRegCount = new AtomicInteger(0);
+  private static AtomicInteger beforeAllocCount = new AtomicInteger(0);
+  private static AtomicInteger afterAllocCount = new AtomicInteger(0);
+  private static AtomicInteger beforeFinishCount = new AtomicInteger(0);
+  private static AtomicInteger afterFinishCount = new AtomicInteger(0);
+  private static AtomicInteger initCount = new AtomicInteger(0);
+
+  static class TestInterceptor1 implements
+      ApplicationMasterServiceProcessor {
+
+    private ApplicationMasterServiceProcessor nextProcessor;
+
+    @Override
+    public void init(ApplicationMasterServiceContext amsContext,
+        ApplicationMasterServiceProcessor next) {
+      initCount.incrementAndGet();
+      this.nextProcessor = next;
+    }
+
+    @Override
+    public void registerApplicationMaster(
+        ApplicationAttemptId applicationAttemptId,
+        RegisterApplicationMasterRequest request,
+        RegisterApplicationMasterResponse response)
+        throws IOException, YarnException {
+      nextProcessor.registerApplicationMaster(
+          applicationAttemptId, request, response);
+    }
+
+    @Override
+    public void allocate(ApplicationAttemptId appAttemptId,
+        AllocateRequest request,
+        AllocateResponse response) throws YarnException {
+      beforeAllocCount.incrementAndGet();
+      nextProcessor.allocate(appAttemptId, request, response);
+      afterAllocCount.incrementAndGet();
+    }
+
+    @Override
+    public void finishApplicationMaster(
+        ApplicationAttemptId applicationAttemptId,
+        FinishApplicationMasterRequest request,
+        FinishApplicationMasterResponse response) {
+      beforeFinishCount.incrementAndGet();
+      afterFinishCount.incrementAndGet();
+    }
+  }
+
+  static class TestInterceptor2 implements
+      ApplicationMasterServiceProcessor {
+
+    private ApplicationMasterServiceProcessor nextProcessor;
+
+    @Override
+    public void init(ApplicationMasterServiceContext amsContext,
+        ApplicationMasterServiceProcessor next) {
+      initCount.incrementAndGet();
+      this.nextProcessor = next;
+    }
+
+    @Override
+    public void registerApplicationMaster(
+        ApplicationAttemptId applicationAttemptId,
+        RegisterApplicationMasterRequest request,
+        RegisterApplicationMasterResponse response)
+        throws IOException, YarnException {
+      beforeRegCount.incrementAndGet();
+      nextProcessor.registerApplicationMaster(applicationAttemptId,
+              request, response);
+      afterRegCount.incrementAndGet();
+    }
+
+    @Override
+    public void allocate(ApplicationAttemptId appAttemptId,
+        AllocateRequest request, AllocateResponse response)
+        throws YarnException {
+      beforeAllocCount.incrementAndGet();
+      nextProcessor.allocate(appAttemptId, request, response);
+      afterAllocCount.incrementAndGet();
+    }
+
+    @Override
+    public void finishApplicationMaster(
+        ApplicationAttemptId applicationAttemptId,
+        FinishApplicationMasterRequest request,
+        FinishApplicationMasterResponse response) {
+      beforeFinishCount.incrementAndGet();
+      nextProcessor.finishApplicationMaster(
+          applicationAttemptId, request, response);
+      afterFinishCount.incrementAndGet();
+    }
+  }
+
+  @Before
+  public void setup() {
     conf = new YarnConfiguration();
     conf.setClass(YarnConfiguration.RM_SCHEDULER, FifoScheduler.class,
       ResourceScheduler.class);
+  }
+
+  @Test(timeout = 300000)
+  public void testApplicationMasterInterceptor() throws Exception {
+    conf.set(YarnConfiguration.RM_APPLICATION_MASTER_SERVICE_PROCESSORS,
+        TestInterceptor1.class.getName() + ","
+            + TestInterceptor2.class.getName());
+    MockRM rm = new MockRM(conf);
+    rm.start();
+
+    // Register node1
+    MockNM nm1 = rm.registerNode("127.0.0.1:1234", 6 * GB);
+
+    // Submit an application
+    RMApp app1 = rm.submitApp(2048);
+
+    // kick the scheduling
+    nm1.nodeHeartbeat(true);
+    RMAppAttempt attempt1 = app1.getCurrentAppAttempt();
+    MockAM am1 = rm.sendAMLaunched(attempt1.getAppAttemptId());
+    am1.registerAppAttempt();
+    int allocCount = 0;
+
+    am1.addRequests(new String[] {"127.0.0.1"}, GB, 1, 1);
+    AllocateResponse alloc1Response = am1.schedule(); // send the request
+    allocCount++;
+
+    // kick the scheduler
+    nm1.nodeHeartbeat(true);
+    while (alloc1Response.getAllocatedContainers().size() < 1) {
+      LOG.info("Waiting for containers to be created for app 1...");
+      sleep(1000);
+      alloc1Response = am1.schedule();
+      allocCount++;
+    }
+
+    // assert RMIdentifer is set properly in allocated containers
+    Container allocatedContainer =
+        alloc1Response.getAllocatedContainers().get(0);
+    ContainerTokenIdentifier tokenId =
+        BuilderUtils.newContainerTokenIdentifier(allocatedContainer
+            .getContainerToken());
+    am1.unregisterAppAttempt();
+
+    Assert.assertEquals(1, beforeRegCount.get());
+    Assert.assertEquals(1, afterRegCount.get());
+
+    // The allocate calls should be incremented twice
+    Assert.assertEquals(allocCount * 2, beforeAllocCount.get());
+    Assert.assertEquals(allocCount * 2, afterAllocCount.get());
+
+    // Finish should only be called once, since the FirstInterceptor
+    // does not forward the call.
+    Assert.assertEquals(1, beforeFinishCount.get());
+    Assert.assertEquals(1, afterFinishCount.get());
+    rm.stop();
   }
 
   @Test(timeout = 3000000)
@@ -116,7 +276,42 @@ public class TestApplicationMasterService {
     Assert.assertEquals(MockRM.getClusterTimeStamp(), tokenId.getRMIdentifier());
     rm.stop();
   }
-  
+
+  @Test(timeout = 3000000)
+  public void testAllocateResponseIdOverflow() throws Exception {
+    MockRM rm = new MockRM(conf);
+    try {
+      rm.start();
+
+      // Register node1
+      MockNM nm1 = rm.registerNode("127.0.0.1:1234", 6 * GB);
+
+      // Submit an application
+      RMApp app1 = rm.submitApp(2048);
+
+      // kick the scheduling
+      nm1.nodeHeartbeat(true);
+      RMAppAttempt attempt1 = app1.getCurrentAppAttempt();
+      MockAM am1 = rm.sendAMLaunched(attempt1.getAppAttemptId());
+      am1.registerAppAttempt();
+
+      // Set the last reponseId to be MAX_INT
+      Assert.assertTrue(am1.setApplicationLastResponseId(Integer.MAX_VALUE));
+
+      // Both allocate should succeed
+      am1.schedule(); // send allocate with reponseId = MAX_INT
+      Assert.assertEquals(0, am1.getResponseId());
+
+      am1.schedule(); // send allocate with reponseId = 0
+      Assert.assertEquals(1, am1.getResponseId());
+
+    } finally {
+      if (rm != null) {
+        rm.stop();
+      }
+    }
+  }
+
   @Test(timeout=600000)
   public void testInvalidContainerReleaseRequest() throws Exception {
     MockRM rm = new MockRM(conf);
@@ -326,10 +521,8 @@ public class TestApplicationMasterService {
 
   @Test(timeout=1200000)
   public void  testAllocateAfterUnregister() throws Exception {
-    MyResourceManager rm = new MyResourceManager(conf);
+    MockRM rm = new MockRM(conf);
     rm.start();
-    DrainDispatcher rmDispatcher = (DrainDispatcher) rm.getRMContext()
-            .getDispatcher();
     // Register node1
     MockNM nm1 = rm.registerNode("127.0.0.1:1234", 6 * GB);
 
@@ -350,7 +543,7 @@ public class TestApplicationMasterService {
     AllocateResponse alloc1Response = am1.schedule();
 
     nm1.nodeHeartbeat(true);
-    rmDispatcher.await();
+    rm.drainEvents();
     alloc1Response = am1.schedule();
     Assert.assertEquals(0, alloc1Response.getAllocatedContainers().size());
   }
@@ -383,57 +576,47 @@ public class TestApplicationMasterService {
       
       // Ask for a normal increase should be successfull
       am1.sendContainerResizingRequest(Arrays.asList(
-              ContainerResourceChangeRequest.newInstance(
-                  ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
-                  Resources.createResource(2048))), null);
+              UpdateContainerRequest.newInstance(
+                  0, ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
+                  ContainerUpdateType.INCREASE_RESOURCE,
+                  Resources.createResource(2048), null)));
       
       // Target resource is negative, should fail
-      boolean exceptionCaught = false;
-      try {
-        am1.sendContainerResizingRequest(Arrays.asList(
-                ContainerResourceChangeRequest.newInstance(
-                    ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
-                    Resources.createResource(-1))), null);
-      } catch (InvalidResourceRequestException e) {
-        // This is expected
-        exceptionCaught = true;
-      }
-      Assert.assertTrue(exceptionCaught);
-      
+      AllocateResponse response =
+          am1.sendContainerResizingRequest(Arrays.asList(
+              UpdateContainerRequest.newInstance(0,
+                  ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
+                  ContainerUpdateType.INCREASE_RESOURCE,
+                  Resources.createResource(-1), null)));
+      Assert.assertEquals(1, response.getUpdateErrors().size());
+      Assert.assertEquals("RESOURCE_OUTSIDE_ALLOWED_RANGE",
+          response.getUpdateErrors().get(0).getReason());
+
       // Target resource is more than maxAllocation, should fail
-      try {
-        am1.sendContainerResizingRequest(Arrays.asList(
-                ContainerResourceChangeRequest.newInstance(
-                    ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
-                    Resources
-                        .add(registerResponse.getMaximumResourceCapability(),
-                            Resources.createResource(1)))), null);
-      } catch (InvalidResourceRequestException e) {
-        // This is expected
-        exceptionCaught = true;
-      }
+      response = am1.sendContainerResizingRequest(Arrays.asList(
+          UpdateContainerRequest.newInstance(0,
+              ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
+              ContainerUpdateType.INCREASE_RESOURCE,
+              Resources.add(
+                  registerResponse.getMaximumResourceCapability(),
+                  Resources.createResource(1)), null)));
+      Assert.assertEquals(1, response.getUpdateErrors().size());
+      Assert.assertEquals("RESOURCE_OUTSIDE_ALLOWED_RANGE",
+          response.getUpdateErrors().get(0).getReason());
 
-      Assert.assertTrue(exceptionCaught);
-      
       // Contains multiple increase/decrease requests for same contaienrId 
-      try {
-        am1.sendContainerResizingRequest(Arrays.asList(
-                ContainerResourceChangeRequest.newInstance(
-                    ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
-                    Resources
-                        .add(registerResponse.getMaximumResourceCapability(),
-                            Resources.createResource(1)))), Arrays.asList(
-                ContainerResourceChangeRequest.newInstance(
-                    ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
-                    Resources
-                        .add(registerResponse.getMaximumResourceCapability(),
-                            Resources.createResource(1)))));
-      } catch (InvalidResourceRequestException e) {
-        // This is expected
-        exceptionCaught = true;
-      }
-
-      Assert.assertTrue(exceptionCaught);
+      response = am1.sendContainerResizingRequest(Arrays.asList(
+          UpdateContainerRequest.newInstance(0,
+              ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
+              ContainerUpdateType.INCREASE_RESOURCE,
+              Resources.createResource(2048, 4), null),
+          UpdateContainerRequest.newInstance(0,
+              ContainerId.newContainerId(attempt1.getAppAttemptId(), 1),
+              ContainerUpdateType.DECREASE_RESOURCE,
+              Resources.createResource(1024, 1), null)));
+      Assert.assertEquals(1, response.getUpdateErrors().size());
+      Assert.assertEquals("UPDATE_OUTSTANDING_ERROR",
+          response.getUpdateErrors().get(0).getReason());
     } finally {
       if (rm != null) {
         rm.close();
@@ -471,29 +654,18 @@ public class TestApplicationMasterService {
     AllocateResponse response1 = am1.allocate(allocateRequest);
     Assert.assertEquals(appPriority1, response1.getApplicationPriority());
 
-    // get scheduler
-    CapacityScheduler cs = (CapacityScheduler) rm.getResourceScheduler();
-
     // Change the priority of App1 to 8
     Priority appPriority2 = Priority.newInstance(8);
-    cs.updateApplicationPriority(appPriority2, app1.getApplicationId());
+    UserGroupInformation ugi = UserGroupInformation
+        .createRemoteUser(app1.getUser());
+    rm.getRMAppManager().updateApplicationPriority(ugi, app1.getApplicationId(),
+        appPriority2);
 
     AllocateResponse response2 = am1.allocate(allocateRequest);
     Assert.assertEquals(appPriority2, response2.getApplicationPriority());
     rm.stop();
   }
 
-  private static class MyResourceManager extends MockRM {
-
-    public MyResourceManager(YarnConfiguration conf) {
-      super(conf);
-    }
-    @Override
-    protected Dispatcher createDispatcher() {
-      return new DrainDispatcher();
-    }
-  }
-  
   private void sentRMContainerLaunched(MockRM rm, ContainerId containerId) {
     CapacityScheduler cs = (CapacityScheduler) rm.getResourceScheduler();
     RMContainer rmContainer = cs.getRMContainer(containerId);
@@ -503,5 +675,39 @@ public class TestApplicationMasterService {
     } else {
       Assert.fail("Cannot find RMContainer");
     }
+  }
+
+  @Test(timeout = 3000000)
+  public void testResourceProfiles() throws Exception {
+
+    MockRM rm = new MockRM(conf);
+    rm.start();
+    MockNM nm1 = rm.registerNode("127.0.0.1:1234", 6 * GB);
+    RMApp app1 = rm.submitApp(2048);
+    nm1.nodeHeartbeat(true);
+    RMAppAttempt attempt1 = app1.getCurrentAppAttempt();
+    MockAM am1 = rm.sendAMLaunched(attempt1.getAppAttemptId());
+    RegisterApplicationMasterResponse resp = am1.registerAppAttempt();
+    Assert.assertEquals(0, resp.getResourceProfiles().size());
+    rm.stop();
+    conf.setBoolean(YarnConfiguration.RM_RESOURCE_PROFILES_ENABLED, true);
+    conf.set(YarnConfiguration.RM_RESOURCE_PROFILES_SOURCE_FILE,
+        "profiles/sample-profiles-1.json");
+    rm = new MockRM(conf);
+    rm.start();
+    nm1 = rm.registerNode("127.0.0.1:1234", 6 * GB);
+    app1 = rm.submitApp(2048);
+    nm1.nodeHeartbeat(true);
+    attempt1 = app1.getCurrentAppAttempt();
+    am1 = rm.sendAMLaunched(attempt1.getAppAttemptId());
+    resp = am1.registerAppAttempt();
+    Assert.assertEquals(3, resp.getResourceProfiles().size());
+    Assert.assertEquals(Resource.newInstance(1024, 1),
+        resp.getResourceProfiles().get("minimum"));
+    Assert.assertEquals(Resource.newInstance(2048, 2),
+        resp.getResourceProfiles().get("default"));
+    Assert.assertEquals(Resource.newInstance(4096, 4),
+        resp.getResourceProfiles().get("maximum"));
+    rm.stop();
   }
 }

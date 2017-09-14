@@ -103,7 +103,6 @@ import org.mockito.internal.stubbing.answers.ThrowsException;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-import com.google.common.base.Joiner;
 
 /**
  * These tests make sure that DFSClient retries fetching data from DFS
@@ -260,17 +259,20 @@ public class TestDFSClientRetries {
     
     Mockito.doReturn(
             new HdfsFileStatus(0, false, 1, 1024, 0, 0, new FsPermission(
-                (short) 777), "owner", "group", new byte[0], new byte[0],
+                (short) 777), EnumSet.noneOf(HdfsFileStatus.Flags.class),
+                "owner", "group", new byte[0], new byte[0],
                 1010, 0, null, (byte) 0, null)).when(mockNN).getFileInfo(anyString());
     
     Mockito.doReturn(
             new HdfsFileStatus(0, false, 1, 1024, 0, 0, new FsPermission(
-                (short) 777), "owner", "group", new byte[0], new byte[0],
+                (short) 777), EnumSet.noneOf(HdfsFileStatus.Flags.class),
+                "owner", "group", new byte[0], new byte[0],
                 1010, 0, null, (byte) 0, null))
         .when(mockNN)
         .create(anyString(), (FsPermission) anyObject(), anyString(),
             (EnumSetWritable<CreateFlag>) anyObject(), anyBoolean(),
-            anyShort(), anyLong(), (CryptoProtocolVersion[]) anyObject());
+            anyShort(), anyLong(), (CryptoProtocolVersion[]) anyObject(),
+            anyObject());
 
     final DFSClient client = new DFSClient(null, mockNN, conf, null);
     OutputStream os = client.create("testfile", true);
@@ -371,7 +373,7 @@ public class TestDFSClientRetries {
     String file1 = "/testFile1";
     String file2 = "/testFile2";
     // Set short retry timeouts so this test runs faster
-    conf.setInt(DFSConfigKeys.DFS_CLIENT_RETRY_WINDOW_BASE, 10);
+    conf.setInt(HdfsClientConfigKeys.Retry.WINDOW_BASE_KEY, 10);
     conf.setInt(DFS_CLIENT_SOCKET_TIMEOUT_KEY, 2 * 1000);
     MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).build();
     try {
@@ -485,8 +487,7 @@ public class TestDFSClientRetries {
           // complete() may return false a few times before it returns
           // true. We want to wait until it returns true, and then
           // make it retry one more time after that.
-          LOG.info("Called complete(: " +
-              Joiner.on(",").join(invocation.getArguments()) + ")");
+          LOG.info("Called complete:");
           if (!(Boolean)invocation.callRealMethod()) {
             LOG.info("Complete call returned false, not faking a retry RPC");
             return false;

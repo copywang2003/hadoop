@@ -39,6 +39,7 @@ import java.net.URI;
 import java.net.URL;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
@@ -49,6 +50,8 @@ import java.util.StringTokenizer;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MediaType;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.input.BoundedInputStream;
 import org.apache.hadoop.conf.Configuration;
@@ -65,6 +68,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.GlobalStorageStatistics;
 import org.apache.hadoop.fs.GlobalStorageStatistics.StorageStatisticsProvider;
 import org.apache.hadoop.fs.StorageStatistics;
+import org.apache.hadoop.fs.permission.FsCreateModes;
 import org.apache.hadoop.hdfs.DFSOpsCountStatistics;
 import org.apache.hadoop.hdfs.DFSOpsCountStatistics.OpType;
 import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
@@ -79,6 +83,8 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.HAUtilClient;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
+import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
+import org.apache.hadoop.hdfs.protocol.DirectoryListing;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
@@ -89,6 +95,7 @@ import org.apache.hadoop.io.retry.RetryPolicies;
 import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.io.retry.RetryUtils;
 import org.apache.hadoop.ipc.RemoteException;
+import org.apache.hadoop.ipc.StandbyException;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.SecurityUtil;
@@ -100,12 +107,11 @@ import org.apache.hadoop.security.token.TokenSelector;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelector;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.StringUtils;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.map.ObjectReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Charsets;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 
@@ -146,7 +152,7 @@ public class WebHdfsFileSystem extends FileSystem
   private String restCsrfCustomHeader;
   private Set<String> restCsrfMethodsToIgnore;
   private static final ObjectReader READER =
-      new ObjectMapper().reader(Map.class);
+      new ObjectMapper().readerFor(Map.class);
 
   private DFSOpsCountStatistics storageStatistics;
 
@@ -177,10 +183,14 @@ public class WebHdfsFileSystem extends FileSystem
   ) throws IOException {
     super.initialize(uri, conf);
     setConf(conf);
-    /** set user pattern based on configuration file */
+
+    // set user and acl patterns based on configuration file
     UserParam.setUserPattern(conf.get(
         HdfsClientConfigKeys.DFS_WEBHDFS_USER_PATTERN_KEY,
         HdfsClientConfigKeys.DFS_WEBHDFS_USER_PATTERN_DEFAULT));
+    AclPermissionParam.setAclPermissionPattern(conf.get(
+        HdfsClientConfigKeys.DFS_WEBHDFS_ACL_PERMISSION_PATTERN_KEY,
+        HdfsClientConfigKeys.DFS_WEBHDFS_ACL_PERMISSION_PATTERN_DEFAULT));
 
     boolean isOAuth = conf.getBoolean(
         HdfsClientConfigKeys.DFS_WEBHDFS_OAUTH_ENABLED_KEY,
@@ -468,6 +478,13 @@ public class WebHdfsFileSystem extends FileSystem
       }
 
       IOException re = JsonUtilClient.toRemoteException(m);
+
+      //check if exception is due to communication with a Standby name node
+      if (re.getMessage() != null && re.getMessage().endsWith(
+          StandbyException.class.getSimpleName())) {
+        LOG.trace("Detected StandbyException", re);
+        throw new IOException(re);
+      }
       // extract UGI-related exceptions and unwrap InvalidToken
       // the NN mangles these exceptions but the DN does not and may need
       // to re-fetch a token if either report the token is expired
@@ -646,6 +663,8 @@ public class WebHdfsFileSystem extends FileSystem
           url = new URL(conn.getHeaderField("Location"));
           redirectHost = url.getHost() + ":" + url.getPort();
         } finally {
+          // TODO: consider not calling conn.disconnect() to allow connection reuse
+          // See http://tinyurl.com/java7-http-keepalive
           conn.disconnect();
         }
       }
@@ -773,7 +792,7 @@ public class WebHdfsFileSystem extends FileSystem
               a.action == RetryPolicy.RetryAction.RetryDecision.FAILOVER_AND_RETRY;
 
           if (isRetry || isFailoverAndRetry) {
-            LOG.info("Retrying connect to namenode: {}. Already tried {}"
+            LOG.info("Retrying connect to namenode: {}. Already retried {}"
                     + " time(s); retry policy is {}, delay {}ms.",
                 nnAddr, retry, retryPolicy, a.delayMillis);
 
@@ -878,7 +897,9 @@ public class WebHdfsFileSystem extends FileSystem
         LOG.debug("Response decoding failure.", e);
         throw ioe;
       } finally {
-        conn.disconnect();
+        // Don't call conn.disconnect() to allow connection reuse
+        // See http://tinyurl.com/java7-http-keepalive
+        conn.getInputStream().close();
       }
     }
 
@@ -925,6 +946,9 @@ public class WebHdfsFileSystem extends FileSystem
             try {
               validateResponse(op, conn, true);
             } finally {
+              // This is a connection to DataNode.  Let's disconnect since
+              // there is little chance that the connection will be reused
+              // any time soonl
               conn.disconnect();
             }
           }
@@ -970,7 +994,8 @@ public class WebHdfsFileSystem extends FileSystem
     if (permission == null) {
       permission = FsPermission.getDefault();
     }
-    return permission.applyUMask(FsPermission.getUMask(getConf()));
+    return FsCreateModes.applyUMask(permission,
+        FsPermission.getUMask(getConf()));
   }
 
   private HdfsFileStatus getHdfsFileStatus(Path f) throws IOException {
@@ -991,15 +1016,7 @@ public class WebHdfsFileSystem extends FileSystem
   public FileStatus getFileStatus(Path f) throws IOException {
     statistics.incrementReadOps(1);
     storageStatistics.incrementOpCounter(OpType.GET_FILE_STATUS);
-    return makeQualified(getHdfsFileStatus(f), f);
-  }
-
-  private FileStatus makeQualified(HdfsFileStatus f, Path parent) {
-    return new FileStatus(f.getLen(), f.isDir(), f.getReplication(),
-        f.getBlockSize(), f.getModificationTime(), f.getAccessTime(),
-        f.getPermission(), f.getOwner(), f.getGroup(),
-        f.isSymlink() ? new Path(f.getSymlink()) : null,
-        f.getFullPath(parent).makeQualified(getUri(), getWorkingDirectory()));
+    return getHdfsFileStatus(f).makeQualified(getUri(), f);
   }
 
   @Override
@@ -1022,8 +1039,10 @@ public class WebHdfsFileSystem extends FileSystem
     statistics.incrementWriteOps(1);
     storageStatistics.incrementOpCounter(OpType.MKDIRS);
     final HttpOpParam.Op op = PutOpParam.Op.MKDIRS;
+    final FsPermission modes = applyUMask(permission);
     return new FsPathBooleanRunner(op, f,
-        new PermissionParam(applyUMask(permission))
+        new PermissionParam(modes.getMasked()),
+        new UnmaskedPermissionParam(modes.getUnmasked())
     ).run();
   }
 
@@ -1310,9 +1329,11 @@ public class WebHdfsFileSystem extends FileSystem
     statistics.incrementWriteOps(1);
     storageStatistics.incrementOpCounter(OpType.CREATE);
 
+    final FsPermission modes = applyUMask(permission);
     final HttpOpParam.Op op = PutOpParam.Op.CREATE;
     return new FsPathOutputStreamRunner(op, f, bufferSize,
-        new PermissionParam(applyUMask(permission)),
+        new PermissionParam(modes.getMasked()),
+        new UnmaskedPermissionParam(modes.getUnmasked()),
         new OverwriteParam(overwrite),
         new BufferSizeParam(bufferSize),
         new ReplicationParam(replication),
@@ -1328,9 +1349,11 @@ public class WebHdfsFileSystem extends FileSystem
     statistics.incrementWriteOps(1);
     storageStatistics.incrementOpCounter(OpType.CREATE_NON_RECURSIVE);
 
+    final FsPermission modes = applyUMask(permission);
     final HttpOpParam.Op op = PutOpParam.Op.CREATE;
     return new FsPathOutputStreamRunner(op, f, bufferSize,
-        new PermissionParam(applyUMask(permission)),
+        new PermissionParam(modes.getMasked()),
+        new UnmaskedPermissionParam(modes.getUnmasked()),
         new CreateFlagParam(flag),
         new CreateParentParam(false),
         new BufferSizeParam(bufferSize),
@@ -1476,27 +1499,49 @@ public class WebHdfsFileSystem extends FileSystem
     statistics.incrementReadOps(1);
     storageStatistics.incrementOpCounter(OpType.LIST_STATUS);
 
+    final URI fsUri = getUri();
     final HttpOpParam.Op op = GetOpParam.Op.LISTSTATUS;
     return new FsPathResponseRunner<FileStatus[]>(op, f) {
       @Override
       FileStatus[] decodeResponse(Map<?,?> json) {
-        final Map<?, ?> rootmap =
-            (Map<?, ?>)json.get(FileStatus.class.getSimpleName() + "es");
-        final List<?> array = JsonUtilClient.getList(rootmap,
-            FileStatus.class.getSimpleName());
-
-        //convert FileStatus
-        assert array != null;
-        final FileStatus[] statuses = new FileStatus[array.size()];
-        int i = 0;
-        for (Object object : array) {
-          final Map<?, ?> m = (Map<?, ?>) object;
-          statuses[i++] = makeQualified(JsonUtilClient.toFileStatus(m, false),
-              f);
+        HdfsFileStatus[] hdfsStatuses =
+            JsonUtilClient.toHdfsFileStatusArray(json);
+        final FileStatus[] statuses = new FileStatus[hdfsStatuses.length];
+        for (int i = 0; i < hdfsStatuses.length; i++) {
+          statuses[i] = hdfsStatuses[i].makeQualified(fsUri, f);
         }
+
         return statuses;
       }
     }.run();
+  }
+
+  private static final byte[] EMPTY_ARRAY = new byte[] {};
+
+  @Override
+  public DirectoryEntries listStatusBatch(Path f, byte[] token) throws
+      FileNotFoundException, IOException {
+    byte[] prevKey = EMPTY_ARRAY;
+    if (token != null) {
+      prevKey = token;
+    }
+    DirectoryListing listing = new FsPathResponseRunner<DirectoryListing>(
+        GetOpParam.Op.LISTSTATUS_BATCH,
+        f, new StartAfterParam(new String(prevKey, Charsets.UTF_8))) {
+      @Override
+      DirectoryListing decodeResponse(Map<?, ?> json) throws IOException {
+        return JsonUtilClient.toDirectoryListing(json);
+      }
+    }.run();
+    // Qualify the returned FileStatus array
+    final URI fsUri = getUri();
+    final HdfsFileStatus[] statuses = listing.getPartialListing();
+    FileStatus[] qualified = new FileStatus[statuses.length];
+    for (int i = 0; i < statuses.length; i++) {
+      qualified[i] = statuses[i].makeQualified(fsUri, f);
+    }
+    return new DirectoryEntries(qualified, listing.getLastName(),
+        listing.hasMore());
   }
 
   @Override
@@ -1571,16 +1616,91 @@ public class WebHdfsFileSystem extends FileSystem
       final long offset, final long length) throws IOException {
     statistics.incrementReadOps(1);
     storageStatistics.incrementOpCounter(OpType.GET_FILE_BLOCK_LOCATIONS);
+    BlockLocation[] locations = null;
+    try {
+      locations = getFileBlockLocations(
+          GetOpParam.Op.GETFILEBLOCKLOCATIONS,
+          p, offset, length);
+    } catch (RemoteException e) {
+      // See the error message from ExceptionHandle
+      if(e.getMessage() != null &&
+          e.getMessage().contains(
+              "Invalid value for webhdfs parameter") &&
+          e.getMessage().contains(
+              GetOpParam.Op.GETFILEBLOCKLOCATIONS.toString())) {
+        // Old webhdfs server doesn't support GETFILEBLOCKLOCATIONS
+        // operation, fall back to query again using old API
+        // GET_BLOCK_LOCATIONS.
+        LOG.info("Invalid webhdfs operation parameter "
+            + GetOpParam.Op.GETFILEBLOCKLOCATIONS + ". Fallback to use "
+            + GetOpParam.Op.GET_BLOCK_LOCATIONS + " instead.");
+        locations = getFileBlockLocations(
+            GetOpParam.Op.GET_BLOCK_LOCATIONS,
+            p, offset, length);
+      }
+    }
+    return locations;
+  }
 
-    final HttpOpParam.Op op = GetOpParam.Op.GET_BLOCK_LOCATIONS;
-    return new FsPathResponseRunner<BlockLocation[]>(op, p,
+  /**
+   * Get file block locations implementation. Provide a operation
+   * parameter to determine how to get block locations from a webhdfs
+   * server. Older server only supports <b>GET_BLOCK_LOCATIONS</b> but
+   * not <b>GETFILEBLOCKLOCATIONS</b>.
+   *
+   * @param path path to the file
+   * @param offset start offset in the given file
+   * @param length of the file to get locations for
+   * @param operation
+   *   Valid operation is either
+   *   {@link org.apache.hadoop.hdfs.web.resources.GetOpParam.Op
+   *   #GET_BLOCK_LOCATIONS} or
+   *   {@link org.apache.hadoop.hdfs.web.resources.GetOpParam.Op
+   *   #GET_BLOCK_LOCATIONS}
+   * @throws IOException
+   *   Http connection error, decoding error or given
+   *   operation is not valid
+   */
+  @VisibleForTesting
+  protected BlockLocation[] getFileBlockLocations(
+      GetOpParam.Op operation, final Path path,
+      final long offset, final long length) throws IOException {
+    return new FsPathResponseRunner<BlockLocation[]>(operation, path,
         new OffsetParam(offset), new LengthParam(length)) {
       @Override
       BlockLocation[] decodeResponse(Map<?,?> json) throws IOException {
-        return DFSUtilClient.locatedBlocks2Locations(
-            JsonUtilClient.toLocatedBlocks(json));
+        switch(operation) {
+        case GETFILEBLOCKLOCATIONS:
+          return JsonUtilClient.toBlockLocationArray(json);
+        case GET_BLOCK_LOCATIONS:
+          return DFSUtilClient.locatedBlocks2Locations(
+              JsonUtilClient.toLocatedBlocks(json));
+        default :
+          throw new IOException("Unknown operation " + operation.name());
+        }
       }
     }.run();
+  }
+
+  @Override
+  public Path getTrashRoot(Path path) {
+    statistics.incrementReadOps(1);
+    storageStatistics.incrementOpCounter(OpType.GET_TRASH_ROOT);
+
+    final HttpOpParam.Op op = GetOpParam.Op.GETTRASHROOT;
+    try {
+      String strTrashPath = new FsPathResponseRunner<String>(op, path) {
+        @Override
+        String decodeResponse(Map<?, ?> json) throws IOException {
+          return JsonUtilClient.getPath(json);
+        }
+      }.run();
+      return new Path(strTrashPath).makeQualified(getUri(), null);
+    } catch(IOException e) {
+      LOG.warn("Cannot find trash root of " + path, e);
+      // keep the same behavior with dfs
+      return super.getTrashRoot(path).makeQualified(getUri(), null);
+    }
   }
 
   @Override
@@ -1654,6 +1774,50 @@ public class WebHdfsFileSystem extends FileSystem
   public String getCanonicalServiceName() {
     return tokenServiceName == null ? super.getCanonicalServiceName()
         : tokenServiceName.toString();
+  }
+
+  @Override
+  public void setStoragePolicy(Path p, String policyName) throws IOException {
+    if (policyName == null) {
+      throw new IOException("policyName == null");
+    }
+    statistics.incrementWriteOps(1);
+    storageStatistics.incrementOpCounter(OpType.SET_STORAGE_POLICY);
+    final HttpOpParam.Op op = PutOpParam.Op.SETSTORAGEPOLICY;
+    new FsPathRunner(op, p, new StoragePolicyParam(policyName)).run();
+  }
+
+  @Override
+  public Collection<BlockStoragePolicy> getAllStoragePolicies()
+      throws IOException {
+    final HttpOpParam.Op op = GetOpParam.Op.GETALLSTORAGEPOLICY;
+    return new FsPathResponseRunner<Collection<BlockStoragePolicy>>(op, null) {
+      @Override
+      Collection<BlockStoragePolicy> decodeResponse(Map<?, ?> json)
+          throws IOException {
+        return JsonUtilClient.getStoragePolicies(json);
+      }
+    }.run();
+  }
+
+  @Override
+  public BlockStoragePolicy getStoragePolicy(Path src) throws IOException {
+    final HttpOpParam.Op op = GetOpParam.Op.GETSTORAGEPOLICY;
+    return new FsPathResponseRunner<BlockStoragePolicy>(op, src) {
+      @Override
+      BlockStoragePolicy decodeResponse(Map<?, ?> json) throws IOException {
+        return JsonUtilClient.toBlockStoragePolicy((Map<?, ?>) json
+            .get(BlockStoragePolicy.class.getSimpleName()));
+      }
+    }.run();
+  }
+
+  @Override
+  public void unsetStoragePolicy(Path src) throws IOException {
+    statistics.incrementWriteOps(1);
+    storageStatistics.incrementOpCounter(OpType.UNSET_STORAGE_POLICY);
+    final HttpOpParam.Op op = PostOpParam.Op.UNSETSTORAGEPOLICY;
+    new FsPathRunner(op, src).run();
   }
 
   @VisibleForTesting
@@ -1793,6 +1957,9 @@ public class WebHdfsFileSystem extends FileSystem
     int read(byte[] b, int off, int len) throws IOException {
       if (runnerState == RunnerState.CLOSED) {
         throw new IOException("Stream closed");
+      }
+      if (len == 0) {
+        return 0;
       }
 
       // Before the first read, pos and fileLength will be 0 and readBuffer

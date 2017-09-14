@@ -18,37 +18,56 @@
 package org.apache.hadoop.hdfs.server.namenode.snapshot;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.Random;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
+import org.apache.hadoop.hdfs.client.HdfsDataOutputStream.SyncFlag;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffReportEntry;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport.DiffType;
+import org.apache.hadoop.hdfs.server.namenode.NameNode;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.util.Time;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests snapshot deletion.
  */
 public class TestSnapshotDiffReport {
-  protected static final long seed = 0;
-  protected static final short REPLICATION = 3;
-  protected static final short REPLICATION_1 = 2;
-  protected static final long BLOCKSIZE = 1024;
-  public static final int SNAPSHOTNUMBER = 10;
-  
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestSnapshotDiffReport.class);
+
+  private static final long SEED = 0;
+  private static final short REPLICATION = 3;
+  private static final short REPLICATION_1 = 2;
+  private static final long BLOCKSIZE = 1024;
+  private static final long BUFFERLEN = BLOCKSIZE / 2;
+  private static final long FILELEN = BLOCKSIZE * 2;
+
   private final Path dir = new Path("/TestSnapshot");
   private final Path sub1 = new Path(dir, "sub1");
   
@@ -61,6 +80,12 @@ public class TestSnapshotDiffReport {
   @Before
   public void setUp() throws Exception {
     conf = new Configuration();
+    conf.setBoolean(
+        DFSConfigKeys.DFS_NAMENODE_SNAPSHOT_CAPTURE_OPENFILES, true);
+    conf.setLong(DFSConfigKeys.DFS_NAMENODE_ACCESSTIME_PRECISION_KEY, 1);
+    conf.setBoolean(
+        DFSConfigKeys.DFS_NAMENODE_SNAPSHOT_SKIP_CAPTURE_ACCESSTIME_ONLY_CHANGE,
+        true);
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(REPLICATION)
         .format(true).build();
     cluster.waitActive();
@@ -97,10 +122,10 @@ public class TestSnapshotDiffReport {
     Path link13 = new Path(modifyDir, "link13");
     Path file14 = new Path(modifyDir, "file14");
     Path file15 = new Path(modifyDir, "file15");
-    DFSTestUtil.createFile(hdfs, file10, BLOCKSIZE, REPLICATION_1, seed);
-    DFSTestUtil.createFile(hdfs, file11, BLOCKSIZE, REPLICATION_1, seed);
-    DFSTestUtil.createFile(hdfs, file12, BLOCKSIZE, REPLICATION_1, seed);
-    DFSTestUtil.createFile(hdfs, file13, BLOCKSIZE, REPLICATION_1, seed);
+    DFSTestUtil.createFile(hdfs, file10, BLOCKSIZE, REPLICATION_1, SEED);
+    DFSTestUtil.createFile(hdfs, file11, BLOCKSIZE, REPLICATION_1, SEED);
+    DFSTestUtil.createFile(hdfs, file12, BLOCKSIZE, REPLICATION_1, SEED);
+    DFSTestUtil.createFile(hdfs, file13, BLOCKSIZE, REPLICATION_1, SEED);
     // create link13
     hdfs.createSymlink(file13, link13, false);
     // create snapshot
@@ -118,9 +143,9 @@ public class TestSnapshotDiffReport {
     // delete link13
     hdfs.delete(link13, false);
     // create file14
-    DFSTestUtil.createFile(hdfs, file14, BLOCKSIZE, REPLICATION, seed);
+    DFSTestUtil.createFile(hdfs, file14, BLOCKSIZE, REPLICATION, SEED);
     // create file15
-    DFSTestUtil.createFile(hdfs, file15, BLOCKSIZE, REPLICATION, seed);
+    DFSTestUtil.createFile(hdfs, file15, BLOCKSIZE, REPLICATION, SEED);
     
     // create snapshot
     for (Path snapshotDir : snapshotDirs) {
@@ -128,7 +153,7 @@ public class TestSnapshotDiffReport {
     }
     
     // create file11 again
-    DFSTestUtil.createFile(hdfs, file11, BLOCKSIZE, REPLICATION, seed);
+    DFSTestUtil.createFile(hdfs, file11, BLOCKSIZE, REPLICATION, SEED);
     // delete file12
     hdfs.delete(file12, true);
     // modify file13
@@ -155,8 +180,8 @@ public class TestSnapshotDiffReport {
     // reverse the order of from and to
     SnapshotDiffReport inverseReport = hdfs
         .getSnapshotDiffReport(dir, to, from);
-    System.out.println(report.toString());
-    System.out.println(inverseReport.toString() + "\n");
+    LOG.info(report.toString());
+    LOG.info(inverseReport.toString() + "\n");
     
     assertEquals(entries.length, report.getDiffList().size());
     assertEquals(entries.length, inverseReport.getDiffList().size());
@@ -209,20 +234,20 @@ public class TestSnapshotDiffReport {
     
     // diff between the same snapshot
     SnapshotDiffReport report = hdfs.getSnapshotDiffReport(sub1, "s0", "s0");
-    System.out.println(report);
+    LOG.info(report.toString());
     assertEquals(0, report.getDiffList().size());
     
     report = hdfs.getSnapshotDiffReport(sub1, "", "");
-    System.out.println(report);
+    LOG.info(report.toString());
     assertEquals(0, report.getDiffList().size());
     
     report = hdfs.getSnapshotDiffReport(subsubsub1, "s0", "s2");
-    System.out.println(report);
+    LOG.info(report.toString());
     assertEquals(0, report.getDiffList().size());
 
     // test path with scheme also works
     report = hdfs.getSnapshotDiffReport(hdfs.makeQualified(subsubsub1), "s0", "s2");
-    System.out.println(report);
+    LOG.info(report.toString());
     assertEquals(0, report.getDiffList().size());
 
     verifyDiffReport(sub1, "s0", "s2", 
@@ -386,8 +411,8 @@ public class TestSnapshotDiffReport {
     final Path fileInFoo = new Path(foo, "file");
     final Path bar = new Path(dir2, "bar");
     final Path fileInBar = new Path(bar, "file");
-    DFSTestUtil.createFile(hdfs, fileInFoo, BLOCKSIZE, REPLICATION, seed);
-    DFSTestUtil.createFile(hdfs, fileInBar, BLOCKSIZE, REPLICATION, seed);
+    DFSTestUtil.createFile(hdfs, fileInFoo, BLOCKSIZE, REPLICATION, SEED);
+    DFSTestUtil.createFile(hdfs, fileInBar, BLOCKSIZE, REPLICATION, SEED);
 
     // create snapshot on /dir1
     SnapshotTestHelper.createSnapshot(hdfs, dir1, "s0");
@@ -421,8 +446,8 @@ public class TestSnapshotDiffReport {
     final Path fileInFoo = new Path(foo, "file");
     final Path bar = new Path(dir2, "bar");
     final Path fileInBar = new Path(bar, "file");
-    DFSTestUtil.createFile(hdfs, fileInFoo, BLOCKSIZE, REPLICATION, seed);
-    DFSTestUtil.createFile(hdfs, fileInBar, BLOCKSIZE, REPLICATION, seed);
+    DFSTestUtil.createFile(hdfs, fileInFoo, BLOCKSIZE, REPLICATION, SEED);
+    DFSTestUtil.createFile(hdfs, fileInBar, BLOCKSIZE, REPLICATION, SEED);
 
     SnapshotTestHelper.createSnapshot(hdfs, root, "s0");
     hdfs.rename(fileInFoo, fileInBar, Rename.OVERWRITE);
@@ -454,7 +479,7 @@ public class TestSnapshotDiffReport {
     final Path root = new Path("/");
     final Path foo = new Path(root, "foo");
     final Path fileInFoo = new Path(foo, "file");
-    DFSTestUtil.createFile(hdfs, fileInFoo, BLOCKSIZE, REPLICATION, seed);
+    DFSTestUtil.createFile(hdfs, fileInFoo, BLOCKSIZE, REPLICATION, SEED);
 
     SnapshotTestHelper.createSnapshot(hdfs, root, "s0");
     final Path bar = new Path(root, "bar");
@@ -478,7 +503,7 @@ public class TestSnapshotDiffReport {
   public void testDiffReportWithRenameAndAppend() throws Exception {
     final Path root = new Path("/");
     final Path foo = new Path(root, "foo");
-    DFSTestUtil.createFile(hdfs, foo, BLOCKSIZE, REPLICATION, seed);
+    DFSTestUtil.createFile(hdfs, foo, BLOCKSIZE, REPLICATION, SEED);
 
     SnapshotTestHelper.createSnapshot(hdfs, root, "s0");
     final Path bar = new Path(root, "bar");
@@ -504,7 +529,7 @@ public class TestSnapshotDiffReport {
     final Path root = new Path("/");
     final Path foo = new Path(root, "foo");
     final Path bar = new Path(foo, "bar");
-    DFSTestUtil.createFile(hdfs, bar, BLOCKSIZE, REPLICATION, seed);
+    DFSTestUtil.createFile(hdfs, bar, BLOCKSIZE, REPLICATION, SEED);
 
     SnapshotTestHelper.createSnapshot(hdfs, root, "s0");
     // rename /foo to /foo2
@@ -528,5 +553,279 @@ public class TestSnapshotDiffReport {
         new DiffReportEntry(DiffType.MODIFY, DFSUtil.string2Bytes("foo2")),
         new DiffReportEntry(DiffType.RENAME, DFSUtil.string2Bytes("foo2/bar"),
             DFSUtil.string2Bytes("foo2/bar-new")));
+  }
+
+  private void createFile(final Path filePath) throws IOException {
+    DFSTestUtil.createFile(hdfs, filePath, (int) BUFFERLEN,
+        FILELEN, BLOCKSIZE, REPLICATION, SEED);
+  }
+
+  private int writeToStream(final FSDataOutputStream outputStream,
+      byte[] buf) throws IOException {
+    outputStream.write(buf);
+    ((HdfsDataOutputStream)outputStream).hsync(
+        EnumSet.of(SyncFlag.UPDATE_LENGTH));
+    return buf.length;
+  }
+
+  private void restartNameNode() throws Exception {
+    cluster.triggerBlockReports();
+    NameNode nameNode = cluster.getNameNode();
+    NameNodeAdapter.enterSafeMode(nameNode, false);
+    NameNodeAdapter.saveNamespace(nameNode);
+    NameNodeAdapter.leaveSafeMode(nameNode);
+    cluster.restartNameNode(true);
+  }
+
+  /**
+   * Test Snapshot diff report for snapshots with open files captures in them.
+   * Also verify if the diff report remains the same across NameNode restarts.
+   */
+  @Test (timeout = 120000)
+  public void testDiffReportWithOpenFiles() throws Exception {
+    // Construct the directory tree
+    final Path level0A = new Path("/level_0_A");
+    final Path flumeSnapRootDir = level0A;
+    final String flumeFileName = "flume.log";
+    final String flumeSnap1Name = "flume_snap_1";
+    final String flumeSnap2Name = "flume_snap_2";
+
+    // Create files and open a stream
+    final Path flumeFile = new Path(level0A, flumeFileName);
+    createFile(flumeFile);
+    FSDataOutputStream flumeOutputStream = hdfs.append(flumeFile);
+
+    // Create Snapshot S1
+    final Path flumeS1Dir = SnapshotTestHelper.createSnapshot(
+        hdfs, flumeSnapRootDir, flumeSnap1Name);
+    final Path flumeS1Path = new Path(flumeS1Dir, flumeFileName);
+    final long flumeFileLengthAfterS1 = hdfs.getFileStatus(flumeFile).getLen();
+
+    // Verify if Snap S1 file length is same as the the live one
+    Assert.assertEquals(flumeFileLengthAfterS1,
+        hdfs.getFileStatus(flumeS1Path).getLen());
+
+    verifyDiffReport(level0A, flumeSnap1Name, "",
+        new DiffReportEntry(DiffType.MODIFY, DFSUtil.string2Bytes("")));
+
+    long flumeFileWrittenDataLength = flumeFileLengthAfterS1;
+    int newWriteLength = (int) (BLOCKSIZE * 1.5);
+    byte[] buf = new byte[newWriteLength];
+    Random random = new Random();
+    random.nextBytes(buf);
+
+    // Write more data to flume file
+    flumeFileWrittenDataLength += writeToStream(flumeOutputStream, buf);
+
+    // Create Snapshot S2
+    final Path flumeS2Dir = SnapshotTestHelper.createSnapshot(
+        hdfs, flumeSnapRootDir, flumeSnap2Name);
+    final Path flumeS2Path = new Path(flumeS2Dir, flumeFileName);
+
+    // Verify live files length is same as all data written till now
+    final long flumeFileLengthAfterS2 = hdfs.getFileStatus(flumeFile).getLen();
+    Assert.assertEquals(flumeFileWrittenDataLength, flumeFileLengthAfterS2);
+
+    // Verify if Snap S2 file length is same as the live one
+    Assert.assertEquals(flumeFileLengthAfterS2,
+        hdfs.getFileStatus(flumeS2Path).getLen());
+
+    verifyDiffReport(level0A, flumeSnap1Name, "",
+        new DiffReportEntry(DiffType.MODIFY, DFSUtil.string2Bytes("")),
+        new DiffReportEntry(DiffType.MODIFY,
+            DFSUtil.string2Bytes(flumeFileName)));
+
+    verifyDiffReport(level0A, flumeSnap2Name, "",
+        new DiffReportEntry(DiffType.MODIFY, DFSUtil.string2Bytes("")));
+
+    verifyDiffReport(level0A, flumeSnap1Name, flumeSnap2Name,
+        new DiffReportEntry(DiffType.MODIFY, DFSUtil.string2Bytes("")),
+        new DiffReportEntry(DiffType.MODIFY,
+            DFSUtil.string2Bytes(flumeFileName)));
+
+    // Write more data to flume file
+    flumeFileWrittenDataLength += writeToStream(flumeOutputStream, buf);
+
+    // Verify old flume snapshots have point-in-time / frozen file lengths
+    // even after the live file have moved forward.
+    Assert.assertEquals(flumeFileLengthAfterS1,
+        hdfs.getFileStatus(flumeS1Path).getLen());
+    Assert.assertEquals(flumeFileLengthAfterS2,
+        hdfs.getFileStatus(flumeS2Path).getLen());
+
+    flumeOutputStream.close();
+
+    // Verify if Snap S2 file length is same as the live one
+    Assert.assertEquals(flumeFileWrittenDataLength,
+        hdfs.getFileStatus(flumeFile).getLen());
+
+    // Verify old flume snapshots have point-in-time / frozen file lengths
+    // even after the live file have moved forward.
+    Assert.assertEquals(flumeFileLengthAfterS1,
+        hdfs.getFileStatus(flumeS1Path).getLen());
+    Assert.assertEquals(flumeFileLengthAfterS2,
+        hdfs.getFileStatus(flumeS2Path).getLen());
+
+    verifyDiffReport(level0A, flumeSnap1Name, "",
+        new DiffReportEntry(DiffType.MODIFY, DFSUtil.string2Bytes("")),
+        new DiffReportEntry(DiffType.MODIFY,
+            DFSUtil.string2Bytes(flumeFileName)));
+
+    verifyDiffReport(level0A, flumeSnap2Name, "",
+        new DiffReportEntry(DiffType.MODIFY, DFSUtil.string2Bytes("")),
+        new DiffReportEntry(DiffType.MODIFY,
+            DFSUtil.string2Bytes(flumeFileName)));
+
+    verifyDiffReport(level0A, flumeSnap1Name, flumeSnap2Name,
+        new DiffReportEntry(DiffType.MODIFY, DFSUtil.string2Bytes("")),
+        new DiffReportEntry(DiffType.MODIFY,
+            DFSUtil.string2Bytes(flumeFileName)));
+
+    restartNameNode();
+
+    verifyDiffReport(level0A, flumeSnap1Name, flumeSnap2Name,
+        new DiffReportEntry(DiffType.MODIFY, DFSUtil.string2Bytes("")),
+        new DiffReportEntry(DiffType.MODIFY,
+            DFSUtil.string2Bytes(flumeFileName)));
+
+  }
+
+  private long getAccessTime(Path path) throws IOException {
+    return hdfs.getFileStatus(path).getAccessTime();
+  }
+
+  private String getAccessTimeStr(Path path) throws IOException {
+    SimpleDateFormat timeFmt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+    return timeFmt.format(new Date(getAccessTime(path)));
+  }
+
+  private Path getSSpath(Path path, Path ssRoot, String ssName) {
+    return new Path(ssRoot, ".snapshot/" + ssName + "/" +
+        path.toString().substring(ssRoot.toString().length()));
+  }
+
+  private void printAtime(Path path, Path ssRoot, String ssName)
+      throws IOException {
+    Path ssPath = getSSpath(path, ssRoot, ssName);
+    LOG.info("Access time "
+        + path + ": " + getAccessTimeStr(path)
+        + " " + ssPath + ": " + getAccessTimeStr(ssPath));
+  }
+
+  private void assertAtimeEquals(Path path, Path ssRoot,
+      String ssName1, String ssName2)
+      throws IOException {
+    Path ssPath1 = getSSpath(path, ssRoot, ssName1);
+    Path ssPath2 = getSSpath(path, ssRoot, ssName2);
+    assertEquals(getAccessTime(ssPath1), getAccessTime(ssPath2));
+  }
+
+  private void assertAtimeNotEquals(Path path, Path ssRoot,
+      String ssName1, String ssName2)
+      throws IOException {
+    Path ssPath1 = getSSpath(path, ssRoot, ssName1);
+    Path ssPath2 = getSSpath(path, ssRoot, ssName2);
+    assertNotEquals(getAccessTime(ssPath1), getAccessTime(ssPath2));
+  }
+
+  /**
+   * Check to see access time is not captured in snapshot when applicable.
+   * When DFS_NAMENODE_SNAPSHOT_SKIP_CAPTURE_ACCESSTIME_ONLY_CHANGE
+   * is set to true, and if a file's access time changed between two
+   * snapshots but has no other modification, then the access time is not
+   * captured in snapshot.
+   */
+  @Test
+  public void testDontCaptureAccessTimeOnlyChangeReport() throws Exception {
+    final Path froot = new Path("/");
+    final Path root = new Path(froot, "/testSdiffCalc");
+
+    // items created pre enabling snapshot
+    final Path filePreSS = new Path(root, "fParent/filePreSS");
+    final Path dirPreSS = new Path(root, "dirPreSS");
+    final Path dirPreSSChild = new Path(dirPreSS, "dirPreSSChild");
+
+    // items created after enabling snapshot
+    final Path filePostSS = new Path(root, "fParent/filePostSS");
+    final Path dirPostSS = new Path(root, "dirPostSS");
+    final Path dirPostSSChild = new Path(dirPostSS, "dirPostSSChild");
+
+    DFSTestUtil.createFile(hdfs, filePreSS, BLOCKSIZE, REPLICATION, SEED);
+    DFSTestUtil.createFile(hdfs, dirPreSSChild, BLOCKSIZE, REPLICATION, SEED);
+
+    SnapshotTestHelper.createSnapshot(hdfs, root, "s0");
+    printAtime(filePreSS, root, "s0");
+    printAtime(dirPreSS, root, "s0");
+
+    // items created after creating the first snapshot
+    DFSTestUtil.createFile(hdfs, filePostSS, BLOCKSIZE, REPLICATION, SEED);
+    DFSTestUtil.createFile(hdfs, dirPostSSChild, BLOCKSIZE, REPLICATION, SEED);
+
+    Thread.sleep(3000);
+    long now = Time.now();
+    hdfs.setTimes(filePreSS, -1, now);
+    hdfs.setTimes(filePostSS, -1, now);
+    hdfs.setTimes(dirPreSS, -1, now);
+    hdfs.setTimes(dirPostSS, -1, now);
+
+    SnapshotTestHelper.createSnapshot(hdfs, root, "s1");
+    printAtime(filePreSS, root, "s1");
+    printAtime(dirPreSS, root, "s1");
+    printAtime(filePostSS, root, "s1");
+    printAtime(dirPostSS, root, "s1");
+
+    Thread.sleep(3000);
+    now = Time.now();
+    hdfs.setTimes(filePreSS, -1, now);
+    hdfs.setTimes(filePostSS, -1, now);
+    hdfs.setTimes(dirPreSS, -1, now);
+    hdfs.setTimes(dirPostSS, -1, now);
+
+    SnapshotTestHelper.createSnapshot(hdfs, root, "s2");
+    printAtime(filePreSS, root, "s2");
+    printAtime(dirPreSS, root, "s2");
+    printAtime(filePostSS, root, "s2");
+    printAtime(dirPostSS, root, "s2");
+
+    Thread.sleep(3000);
+    now = Time.now();
+    // modify filePostSS, and change access time
+    hdfs.setReplication(filePostSS, (short) (REPLICATION - 1));
+    hdfs.setTimes(filePostSS, -1, now);
+    SnapshotTestHelper.createSnapshot(hdfs, root, "s3");
+
+    LOG.info("\nsnapshotDiff s0 -> s1:");
+    LOG.info(hdfs.getSnapshotDiffReport(root, "s0", "s1").toString());
+    LOG.info("\nsnapshotDiff s1 -> s2:");
+    LOG.info(hdfs.getSnapshotDiffReport(root, "s1", "s2").toString());
+
+    assertAtimeEquals(filePreSS, root, "s0", "s1");
+    assertAtimeEquals(dirPreSS, root, "s0", "s1");
+
+    assertAtimeEquals(filePreSS, root, "s1", "s2");
+    assertAtimeEquals(dirPreSS, root, "s1", "s2");
+
+    assertAtimeEquals(filePostSS, root, "s1", "s2");
+    assertAtimeEquals(dirPostSS, root, "s1", "s2");
+
+    // access time should be captured in snapshot due to
+    // other modification
+    assertAtimeNotEquals(filePostSS, root, "s2", "s3");
+
+    // restart NN, and see the access time relationship
+    // still stands (no change caused by edit logs
+    // loading)
+    cluster.restartNameNodes();
+    cluster.waitActive();
+    assertAtimeEquals(filePreSS, root, "s0", "s1");
+    assertAtimeEquals(dirPreSS, root, "s0", "s1");
+
+    assertAtimeEquals(filePreSS, root, "s1", "s2");
+    assertAtimeEquals(dirPreSS, root, "s1", "s2");
+
+    assertAtimeEquals(filePostSS, root, "s1", "s2");
+    assertAtimeEquals(dirPostSS, root, "s1", "s2");
+
+    assertAtimeNotEquals(filePostSS, root, "s2", "s3");
   }
 }

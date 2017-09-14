@@ -56,10 +56,12 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import com.google.common.base.Supplier;
@@ -136,7 +138,7 @@ import com.google.common.collect.Sets;
  */
 @InterfaceAudience.LimitedPrivate({"HBase", "HDFS", "Hive", "MapReduce", "Pig"})
 @InterfaceStability.Unstable
-public class MiniDFSCluster {
+public class MiniDFSCluster implements AutoCloseable {
 
   private static final String NAMESERVICE_ID_PREFIX = "nameserviceId";
   private static final Log LOG = LogFactory.getLog(MiniDFSCluster.class);
@@ -147,6 +149,8 @@ public class MiniDFSCluster {
   public static final String HDFS_MINIDFS_BASEDIR = "hdfs.minidfs.basedir";
   public static final String  DFS_NAMENODE_SAFEMODE_EXTENSION_TESTING_KEY
       = DFS_NAMENODE_SAFEMODE_EXTENSION_KEY + ".testing";
+  public static final String  DFS_NAMENODE_DECOMMISSION_INTERVAL_TESTING_KEY
+      = DFS_NAMENODE_DECOMMISSION_INTERVAL_KEY + ".testing";
 
   // Changing this default may break some tests that assume it is 2.
   private static final int DEFAULT_STORAGES_PER_DATANODE = 2;
@@ -162,6 +166,7 @@ public class MiniDFSCluster {
    */
   public static class Builder {
     private int nameNodePort = 0;
+    private int nameNodeServicePort = 0;
     private int nameNodeHttpPort = 0;
     private final Configuration conf;
     private int numDataNodes = 1;
@@ -202,6 +207,14 @@ public class MiniDFSCluster {
      */
     public Builder nameNodePort(int val) {
       this.nameNodePort = val;
+      return this;
+    }
+
+    /**
+     * Default: 0
+     */
+    public Builder nameNodeServicePort(int val) {
+      this.nameNodeServicePort = val;
       return this;
     }
     
@@ -395,8 +408,8 @@ public class MiniDFSCluster {
     }
 
     /**
-     * Default: false
-     * When true the hosts file/include file for the cluster is setup
+     * Default: false.
+     * When true the hosts file/include file for the cluster is setup.
      */
     public Builder setupHostsFile(boolean val) {
       this.setupHostsFile = val;
@@ -406,7 +419,7 @@ public class MiniDFSCluster {
     /**
      * Default: a single namenode.
      * See {@link MiniDFSNNTopology#simpleFederatedTopology(int)} to set up
-     * federated nameservices
+     * federated nameservices.
      */
     public Builder nnTopology(MiniDFSNNTopology topology) {
       this.nnTopology = topology;
@@ -457,7 +470,8 @@ public class MiniDFSCluster {
     if (builder.nnTopology == null) {
       // If no topology is specified, build a single NN. 
       builder.nnTopology = MiniDFSNNTopology.simpleSingleNN(
-          builder.nameNodePort, builder.nameNodeHttpPort);
+          builder.nameNodePort, builder.nameNodeServicePort,
+          builder.nameNodeHttpPort);
     }
     assert builder.storageTypes == null ||
            builder.storageTypes.length == builder.numDataNodes;
@@ -546,6 +560,8 @@ public class MiniDFSCluster {
   private boolean checkExitOnShutdown = true;
   protected final int storagesPerDatanode;
   private Set<FileSystem> fileSystems = Sets.newHashSet();
+
+  private List<long[]> storageCap = Lists.newLinkedList();
 
   /**
    * A unique instance identifier for the cluster. This
@@ -764,7 +780,7 @@ public class MiniDFSCluster {
                        manageNameDfsDirs, true, manageDataDfsDirs, manageDataDfsDirs,
                        operation, null, racks, hosts,
                        null, simulatedCapacities, null, true, false,
-                       MiniDFSNNTopology.simpleSingleNN(nameNodePort, 0),
+                       MiniDFSNNTopology.simpleSingleNN(nameNodePort, 0, 0),
                        true, false, false, null, true, false);
   }
 
@@ -804,10 +820,21 @@ public class MiniDFSCluster {
     
       int replication = conf.getInt(DFS_REPLICATION_KEY, 3);
       conf.setInt(DFS_REPLICATION_KEY, Math.min(replication, numDataNodes));
+      int maintenanceMinReplication = conf.getInt(
+          DFSConfigKeys.DFS_NAMENODE_MAINTENANCE_REPLICATION_MIN_KEY,
+          DFSConfigKeys.DFS_NAMENODE_MAINTENANCE_REPLICATION_MIN_DEFAULT);
+      if (maintenanceMinReplication ==
+          DFSConfigKeys.DFS_NAMENODE_MAINTENANCE_REPLICATION_MIN_DEFAULT) {
+        conf.setInt(DFSConfigKeys.DFS_NAMENODE_MAINTENANCE_REPLICATION_MIN_KEY,
+            Math.min(maintenanceMinReplication, numDataNodes));
+      }
       int safemodeExtension = conf.getInt(
           DFS_NAMENODE_SAFEMODE_EXTENSION_TESTING_KEY, 0);
       conf.setInt(DFS_NAMENODE_SAFEMODE_EXTENSION_KEY, safemodeExtension);
-      conf.setInt(DFS_NAMENODE_DECOMMISSION_INTERVAL_KEY, 3); // 3 second
+      long decommissionInterval = conf.getTimeDuration(
+          DFS_NAMENODE_DECOMMISSION_INTERVAL_TESTING_KEY, 3, TimeUnit.SECONDS);
+      conf.setTimeDuration(DFS_NAMENODE_DECOMMISSION_INTERVAL_KEY,
+          decommissionInterval, TimeUnit.SECONDS);
       if (!useConfiguredTopologyMappingClass) {
         conf.setClass(NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY,
             StaticMapping.class, DNSToSwitchMapping.class);
@@ -1232,6 +1259,11 @@ public class MiniDFSCluster {
         DFS_NAMENODE_RPC_ADDRESS_KEY, nameserviceId,
         nnConf.getNnId());
     conf.set(key, "127.0.0.1:" + nnConf.getIpcPort());
+
+    key = DFSUtil.addKeySuffixes(
+        DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, nameserviceId,
+        nnConf.getNnId());
+    conf.set(key, "127.0.0.1:" + nnConf.getServicePort());
   }
   
   private static String[] createArgs(StartupOption operation) {
@@ -1265,6 +1297,8 @@ public class MiniDFSCluster {
     // the conf
     hdfsConf.set(DFSUtil.addKeySuffixes(DFS_NAMENODE_RPC_ADDRESS_KEY,
         nameserviceId, nnId), nn.getNameNodeAddressHostPortString());
+    hdfsConf.set(DFSUtil.addKeySuffixes(DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY,
+        nameserviceId, nnId), nn.getServiceRpcAddressHostPortString());
     if (nn.getHttpAddress() != null) {
       hdfsConf.set(DFSUtil.addKeySuffixes(DFS_NAMENODE_HTTP_ADDRESS_KEY,
           nameserviceId, nnId), NetUtils.getHostPortString(nn.getHttpAddress()));
@@ -1318,6 +1352,14 @@ public class MiniDFSCluster {
    */
   public Configuration getConfiguration(int nnIndex) {
     return getNN(nnIndex).conf;
+  }
+
+  /**
+   * Return the cluster-wide configuration.
+   * @return
+   */
+  public Configuration getClusterConfiguration() {
+    return conf;
   }
 
   private NameNodeInfo getNN(int nnIndex) {
@@ -1648,31 +1690,64 @@ public class MiniDFSCluster {
     }
     this.numDataNodes += numDataNodes;
     waitActive();
-    
-    if (storageCapacities != null) {
-      for (int i = curDatanodesNum; i < curDatanodesNum+numDataNodes; ++i) {
-        final int index = i - curDatanodesNum;
-        try (FsDatasetSpi.FsVolumeReferences volumes =
-            dns[index].getFSDataset().getFsVolumeReferences()) {
-          assert storageCapacities[index].length == storagesPerDatanode;
-          assert volumes.size() == storagesPerDatanode;
 
-          int j = 0;
-          for (FsVolumeSpi fvs : volumes) {
-            FsVolumeImpl volume = (FsVolumeImpl) fvs;
-            LOG.info("setCapacityForTesting " + storageCapacities[index][j]
-                + " for [" + volume.getStorageType() + "]" + volume
-                .getStorageID());
-            volume.setCapacityForTesting(storageCapacities[index][j]);
-            j++;
-          }
-        }
+    setDataNodeStorageCapacities(
+        curDatanodesNum,
+        numDataNodes,
+        dns,
+        storageCapacities);
+
+    /* memorize storage capacities */
+    if (storageCapacities != null) {
+      storageCap.addAll(Arrays.asList(storageCapacities));
+    }
+  }
+
+  private synchronized void setDataNodeStorageCapacities(
+      final int curDatanodesNum,
+      final int numDNs,
+      final DataNode[] dns,
+      long[][] storageCapacities) throws IOException {
+    if (storageCapacities != null) {
+      for (int i = curDatanodesNum; i < curDatanodesNum + numDNs; ++i) {
+        final int index = i - curDatanodesNum;
+        setDataNodeStorageCapacities(index, dns[index], storageCapacities);
       }
     }
   }
-  
-  
-  
+
+  private synchronized void setDataNodeStorageCapacities(
+      final int curDnIdx,
+      final DataNode curDn,
+      long[][] storageCapacities) throws IOException {
+
+    if (storageCapacities == null || storageCapacities.length == 0) {
+      return;
+    }
+
+    try {
+      waitDataNodeFullyStarted(curDn);
+    } catch (TimeoutException | InterruptedException e) {
+      throw new IOException(e);
+    }
+
+    try (FsDatasetSpi.FsVolumeReferences volumes = curDn.getFSDataset()
+        .getFsVolumeReferences()) {
+      assert storageCapacities[curDnIdx].length == storagesPerDatanode;
+      assert volumes.size() == storagesPerDatanode;
+
+      int j = 0;
+      for (FsVolumeSpi fvs : volumes) {
+        FsVolumeImpl volume = (FsVolumeImpl) fvs;
+        LOG.info("setCapacityForTesting " + storageCapacities[curDnIdx][j]
+            + " for [" + volume.getStorageType() + "]" + volume.getStorageID());
+        volume.setCapacityForTesting(storageCapacities[curDnIdx][j]);
+        j++;
+      }
+    }
+    DataNodeTestUtils.triggerHeartbeat(curDn);
+  }
+
   /**
    * Modify the config and start up the DataNodes.  The info port for
    * DataNodes is guaranteed to use a free port.
@@ -1880,6 +1955,16 @@ public class MiniDFSCluster {
   }
 
   /**
+   * Gets the service rpc port used by the NameNode, because the caller
+   * supplied port is not necessarily the actual port used.
+   * Assumption: cluster has a single namenode
+   */
+  public int getNameNodeServicePort() {
+    checkSingleNameNode();
+    return getNameNodeServicePort(0);
+  }
+
+  /**
    * @return the service rpc port used by the NameNode at the given index.
    */     
   public int getNameNodeServicePort(int nnIndex) {
@@ -1944,11 +2029,18 @@ public class MiniDFSCluster {
    */
   public void shutdownDataNodes() {
     for (int i = dataNodes.size()-1; i >= 0; i--) {
-      LOG.info("Shutting down DataNode " + i);
-      DataNode dn = dataNodes.remove(i).datanode;
-      dn.shutdown();
-      numDataNodes--;
+      shutdownDataNode(i);
     }
+  }
+
+  /**
+   * Shutdown the datanode at a given index.
+   */
+  public void shutdownDataNode(int dnIndex) {
+    LOG.info("Shutting down DataNode " + dnIndex);
+    DataNode dn = dataNodes.remove(dnIndex).datanode;
+    dn.shutdown();
+    numDataNodes--;
   }
 
   /**
@@ -2236,6 +2328,16 @@ public class MiniDFSCluster {
     return restartDataNode(dnprop, false);
   }
 
+  private void waitDataNodeFullyStarted(final DataNode dn)
+      throws TimeoutException, InterruptedException {
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return dn.isDatanodeFullyStarted();
+      }
+    }, 100, 60000);
+  }
+
   /**
    * Restart a datanode, on the same port if requested
    * @param dnprop the datanode to restart
@@ -2256,10 +2358,21 @@ public class MiniDFSCluster {
       conf.set(DFS_DATANODE_IPC_ADDRESS_KEY,
           addr.getAddress().getHostAddress() + ":" + dnprop.ipcPort); 
     }
-    DataNode newDn = DataNode.createDataNode(args, conf, secureResources);
-    dataNodes.add(new DataNodeProperties(
-        newDn, newconf, args, secureResources, newDn.getIpcPort()));
+    final DataNode newDn = DataNode.createDataNode(args, conf, secureResources);
+
+    final DataNodeProperties dnp = new DataNodeProperties(
+        newDn,
+        newconf,
+        args,
+        secureResources,
+        newDn.getIpcPort());
+    dataNodes.add(dnp);
     numDataNodes++;
+
+    setDataNodeStorageCapacities(
+        dataNodes.lastIndexOf(dnp),
+        newDn,
+        storageCap.toArray(new long[][]{}));
     return true;
   }
 
@@ -2478,12 +2591,14 @@ public class MiniDFSCluster {
     }
 
     NameNodeInfo info = getNN(nnIndex);
-    InetSocketAddress addr = info.nameNode.getServiceRpcAddress();
-    assert addr.getPort() != 0;
-    DFSClient client = new DFSClient(addr, conf);
+    InetSocketAddress nameNodeAddress = info.nameNode.getNameNodeAddress();
+    assert nameNodeAddress.getPort() != 0;
+    DFSClient client = new DFSClient(nameNodeAddress, conf);
 
     // ensure all datanodes have registered and sent heartbeat to the namenode
-    while (shouldWait(client.datanodeReport(DatanodeReportType.LIVE), addr)) {
+    InetSocketAddress serviceAddress = info.nameNode.getServiceRpcAddress();
+    while (shouldWait(client.datanodeReport(DatanodeReportType.LIVE),
+        serviceAddress)) {
       try {
         LOG.info("Waiting for cluster to become active");
         Thread.sleep(100);
@@ -2978,13 +3093,18 @@ public class MiniDFSCluster {
     }
   }
 
+  public void addNameNode(Configuration conf, int namenodePort)
+      throws IOException{
+    addNameNode(conf, namenodePort, 0);
+  }
+
   /**
    * Add a namenode to a federated cluster and start it. Configuration of
    * datanodes in the cluster is refreshed to register with the new namenode.
    * 
    * @return newly started namenode
    */
-  public void addNameNode(Configuration conf, int namenodePort)
+  public void addNameNode(Configuration conf, int namenodePort, int servicePort)
       throws IOException {
     if(!federation)
       throw new IOException("cannot add namenode to non-federated cluster");
@@ -2998,7 +3118,9 @@ public class MiniDFSCluster {
   
     String nnId = null;
     initNameNodeAddress(conf, nameserviceId,
-        new NNConf(nnId).setIpcPort(namenodePort));
+        new NNConf(nnId)
+            .setIpcPort(namenodePort)
+            .setServicePort(servicePort));
     // figure out the current number of NNs
     NameNodeInfo[] infos = this.getNameNodeInfos(nameserviceId);
     int nnIndex = infos == null ? 0 : infos.length;
@@ -3056,5 +3178,10 @@ public class MiniDFSCluster {
     } finally {
       writer.close();
     }
+  }
+
+  @Override
+  public void close() {
+    shutdown();
   }
 }

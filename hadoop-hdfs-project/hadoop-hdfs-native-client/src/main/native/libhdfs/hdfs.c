@@ -93,6 +93,87 @@ int hdfsFileIsOpenForRead(hdfsFile file)
     return (file->type == HDFS_STREAM_INPUT);
 }
 
+int hdfsGetHedgedReadMetrics(hdfsFS fs, struct hdfsHedgedReadMetrics **metrics)
+{
+    jthrowable jthr;
+    jobject hedgedReadMetrics = NULL;
+    jvalue jVal;
+    struct hdfsHedgedReadMetrics *m = NULL;
+    int ret;
+    jobject jFS = (jobject)fs;
+    JNIEnv* env = getJNIEnv();
+
+    if (env == NULL) {
+        errno = EINTERNAL;
+        return -1;
+    }
+
+    jthr = invokeMethod(env, &jVal, INSTANCE, jFS,
+                  HADOOP_DFS,
+                  "getHedgedReadMetrics",
+                  "()Lorg/apache/hadoop/hdfs/DFSHedgedReadMetrics;");
+    if (jthr) {
+        ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
+            "hdfsGetHedgedReadMetrics: getHedgedReadMetrics failed");
+        goto done;
+    }
+    hedgedReadMetrics = jVal.l;
+
+    m = malloc(sizeof(struct hdfsHedgedReadMetrics));
+    if (!m) {
+      ret = ENOMEM;
+      goto done;
+    }
+
+    jthr = invokeMethod(env, &jVal, INSTANCE, hedgedReadMetrics,
+                  "org/apache/hadoop/hdfs/DFSHedgedReadMetrics",
+                  "getHedgedReadOps", "()J");
+    if (jthr) {
+        ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
+            "hdfsGetHedgedReadStatistics: getHedgedReadOps failed");
+        goto done;
+    }
+    m->hedgedReadOps = jVal.j;
+
+    jthr = invokeMethod(env, &jVal, INSTANCE, hedgedReadMetrics,
+                  "org/apache/hadoop/hdfs/DFSHedgedReadMetrics",
+                  "getHedgedReadWins", "()J");
+    if (jthr) {
+        ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
+            "hdfsGetHedgedReadStatistics: getHedgedReadWins failed");
+        goto done;
+    }
+    m->hedgedReadOpsWin = jVal.j;
+
+    jthr = invokeMethod(env, &jVal, INSTANCE, hedgedReadMetrics,
+                  "org/apache/hadoop/hdfs/DFSHedgedReadMetrics",
+                  "getHedgedReadOpsInCurThread", "()J");
+    if (jthr) {
+        ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
+            "hdfsGetHedgedReadStatistics: getHedgedReadOpsInCurThread failed");
+        goto done;
+    }
+    m->hedgedReadOpsInCurThread = jVal.j;
+
+    *metrics = m;
+    m = NULL;
+    ret = 0;
+
+done:
+    destroyLocalReference(env, hedgedReadMetrics);
+    free(m);
+    if (ret) {
+      errno = ret;
+      return -1;
+    }
+    return 0;
+}
+
+void hdfsFreeHedgedReadMetrics(struct hdfsHedgedReadMetrics *metrics)
+{
+  free(metrics);
+}
+
 int hdfsFileGetReadStatistics(hdfsFile file,
                               struct hdfsReadStatistics **stats)
 {
@@ -114,7 +195,7 @@ int hdfsFileGetReadStatistics(hdfsFile file,
     jthr = invokeMethod(env, &jVal, INSTANCE, file->file, 
                   "org/apache/hadoop/hdfs/client/HdfsDataInputStream",
                   "getReadStatistics",
-                  "()Lorg/apache/hadoop/hdfs/DFSInputStream$ReadStatistics;");
+                  "()Lorg/apache/hadoop/hdfs/ReadStatistics;");
     if (jthr) {
         ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
             "hdfsFileGetReadStatistics: getReadStatistics failed");
@@ -127,7 +208,7 @@ int hdfsFileGetReadStatistics(hdfsFile file,
         goto done;
     }
     jthr = invokeMethod(env, &jVal, INSTANCE, readStats,
-                  "org/apache/hadoop/hdfs/DFSInputStream$ReadStatistics",
+                  "org/apache/hadoop/hdfs/ReadStatistics",
                   "getTotalBytesRead", "()J");
     if (jthr) {
         ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
@@ -137,7 +218,7 @@ int hdfsFileGetReadStatistics(hdfsFile file,
     s->totalBytesRead = jVal.j;
 
     jthr = invokeMethod(env, &jVal, INSTANCE, readStats,
-                  "org/apache/hadoop/hdfs/DFSInputStream$ReadStatistics",
+                  "org/apache/hadoop/hdfs/ReadStatistics",
                   "getTotalLocalBytesRead", "()J");
     if (jthr) {
         ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
@@ -147,7 +228,7 @@ int hdfsFileGetReadStatistics(hdfsFile file,
     s->totalLocalBytesRead = jVal.j;
 
     jthr = invokeMethod(env, &jVal, INSTANCE, readStats,
-                  "org/apache/hadoop/hdfs/DFSInputStream$ReadStatistics",
+                  "org/apache/hadoop/hdfs/ReadStatistics",
                   "getTotalShortCircuitBytesRead", "()J");
     if (jthr) {
         ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
@@ -156,7 +237,7 @@ int hdfsFileGetReadStatistics(hdfsFile file,
     }
     s->totalShortCircuitBytesRead = jVal.j;
     jthr = invokeMethod(env, &jVal, INSTANCE, readStats,
-                  "org/apache/hadoop/hdfs/DFSInputStream$ReadStatistics",
+                  "org/apache/hadoop/hdfs/ReadStatistics",
                   "getTotalZeroCopyBytesRead", "()J");
     if (jthr) {
         ret = printExceptionAndFree(env, jthr, PRINT_EXC_ALL,
@@ -2875,6 +2956,7 @@ done:
     destroyLocalReference(env, jFileBlockHosts);
     destroyLocalReference(env, jHost);
     if (ret) {
+        errno = ret;
         if (blockHosts) {
             hdfsFreeHosts(blockHosts);
         }
@@ -3431,7 +3513,15 @@ int hdfsFileIsEncrypted(hdfsFileInfo *fileInfo)
     return !!(extInfo->flags & HDFS_EXTENDED_FILE_INFO_ENCRYPTED);
 }
 
+char* hdfsGetLastExceptionRootCause()
+{
+  return getLastTLSExceptionRootCause();
+}
 
+char* hdfsGetLastExceptionStackTrace()
+{
+  return getLastTLSExceptionStackTrace();
+}
 
 /**
  * vim: ts=4: sw=4: et:

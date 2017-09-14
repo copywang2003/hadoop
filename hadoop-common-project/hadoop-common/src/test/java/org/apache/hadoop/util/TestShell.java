@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.util;
 
+import com.google.common.base.Supplier;
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.security.alias.AbstractJavaKeyStoreProvider;
 import org.junit.Assert;
@@ -235,9 +236,11 @@ public class TestShell extends Assert {
       expectedCommand =
           new String[]{getWinUtilsPath(), "task", "isAlive", anyPid };
     } else if (Shell.isSetsidAvailable) {
-      expectedCommand = new String[] { "bash", "-c", "kill -0 -- -" + anyPid };
+      expectedCommand = new String[] { "bash", "-c", "kill -0 -- -'" +
+            anyPid + "'"};
     } else {
-      expectedCommand = new String[]{ "bash", "-c", "kill -0 " + anyPid };
+      expectedCommand = new String[] {"bash", "-c", "kill -0 '" + anyPid +
+            "'" };
     }
     Assert.assertArrayEquals(expectedCommand, checkProcessAliveCommand);
   }
@@ -255,9 +258,11 @@ public class TestShell extends Assert {
       expectedCommand =
           new String[]{getWinUtilsPath(), "task", "kill", anyPid };
     } else if (Shell.isSetsidAvailable) {
-      expectedCommand = new String[] { "bash", "-c", "kill -9 -- -" + anyPid };
+      expectedCommand = new String[] { "bash", "-c", "kill -9 -- -'" + anyPid +
+            "'"};
     } else {
-      expectedCommand = new String[]{ "bash", "-c", "kill -9 " + anyPid };
+      expectedCommand = new String[]{ "bash", "-c", "kill -9 '" + anyPid +
+            "'"};
     }
     Assert.assertArrayEquals(expectedCommand, checkProcessAliveCommand);
   }
@@ -461,4 +466,61 @@ public class TestShell extends Assert {
     }
   }
 
+  @Test
+  public void testBashQuote() {
+    assertEquals("'foobar'", Shell.bashQuote("foobar"));
+    assertEquals("'foo'\\''bar'", Shell.bashQuote("foo'bar"));
+    assertEquals("''\\''foo'\\''bar'\\'''", Shell.bashQuote("'foo'bar'"));
+  }
+
+  @Test(timeout=120000)
+  public void testDestroyAllShellProcesses() throws Throwable {
+    Assume.assumeFalse(WINDOWS);
+    StringBuffer sleepCommand = new StringBuffer();
+    sleepCommand.append("sleep 200");
+    String[] shellCmd = {"bash", "-c", sleepCommand.toString()};
+    final ShellCommandExecutor shexc1 = new ShellCommandExecutor(shellCmd);
+    final ShellCommandExecutor shexc2 = new ShellCommandExecutor(shellCmd);
+
+    Thread shellThread1 = new Thread() {
+      @Override
+      public void run() {
+        try {
+          shexc1.execute();
+        } catch(IOException ioe) {
+          //ignore IOException from thread interrupt
+        }
+      }
+    };
+    Thread shellThread2 = new Thread() {
+      @Override
+      public void run() {
+        try {
+          shexc2.execute();
+        } catch(IOException ioe) {
+          //ignore IOException from thread interrupt
+        }
+      }
+    };
+
+    shellThread1.start();
+    shellThread2.start();
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return shexc1.getProcess() != null;
+      }
+    }, 10, 10000);
+
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return shexc2.getProcess() != null;
+      }
+    }, 10, 10000);
+
+    Shell.destroyAllShellProcesses();
+    shexc1.getProcess().waitFor();
+    shexc2.getProcess().waitFor();
+  }
 }

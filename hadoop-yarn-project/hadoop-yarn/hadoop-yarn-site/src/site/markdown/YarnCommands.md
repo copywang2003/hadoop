@@ -15,31 +15,7 @@
 YARN Commands
 =============
 
-* [Overview](#Overview)
-* [User Commands](#User_Commands)
-    * [application](#application)
-    * [applicationattempt](#applicationattempt)
-    * [classpath](#classpath)
-    * [container](#container)
-    * [jar](#jar)
-    * [logs](#logs)
-    * [node](#node)
-    * [queue](#queue)
-    * [version](#version)
-* [Administration Commands](#Administration_Commands)
-    * [daemonlog](#daemonlog)
-    * [nodemanager](#nodemanager)
-    * [proxyserver](#proxyserver)
-    * [resourcemanager](#resourcemanager)
-    * [rmadmin](#rmadmin)
-    * [scmadmin](#scmadmin)
-    * [sharedcachemanager](#sharedcachemanager)
-    * [timelineserver](#timelineserver)
-* [Files](#Files)
-    * [etc/hadoop/hadoop-env.sh](#etchadoophadoop-env.sh)
-    * [etc/hadoop/yarn-env.sh](#etchadoopyarn-env.sh)
-    * [etc/hadoop/hadoop-user-functions.sh](#etchadoophadoop-user-functions.sh)
-    * [~/.hadooprc](#a.hadooprc)
+<!-- MACRO{toc|fromDepth=0|toDepth=3} -->
 
 Overview
 --------
@@ -76,6 +52,7 @@ Usage: `yarn application [options] `
 | -movetoqueue \<Application Id\> | Moves the application to a different queue. |
 | -queue \<Queue Name\> | Works with the movetoqueue command to specify which queue to move an application to. |
 | -status \<ApplicationId\> | Prints the status of the application. |
+| -updateLifetime \<Timeout\> | Update application timeout (from the time of request) in seconds. ApplicationId can be specified using 'appId' option. |
 | -updatePriority \<Priority\> | Update priority of an application. ApplicationId can be passed using 'appId' option. |
 
 Prints application(s) report/kill application
@@ -166,6 +143,12 @@ Usage: `yarn version`
 
 Prints the Hadoop version.
 
+### `envvars`
+
+Usage: `yarn envvars`
+
+Display computed Hadoop environment variables.
+
 Administration Commands
 -----------------------
 
@@ -173,21 +156,8 @@ Commands useful for administrators of a Hadoop cluster.
 
 ### `daemonlog`
 
-Usage:
-
-```
-   yarn daemonlog -getlevel <host:httpport> <classname> 
-   yarn daemonlog -setlevel <host:httpport> <classname> <level>
-```
-
-| COMMAND\_OPTIONS | Description |
-|:---- |:---- |
-| -getlevel `<host:httpport>` `<classname>` | Prints the log level of the log identified by a qualified `<classname>`, in the daemon running at `<host:httpport>`. This command internally connects to `http://<host:httpport>/logLevel?log=<classname>` |
-| -setlevel `<host:httpport> <classname> <level>` | Sets the log level of the log identified by a qualified `<classname>` in the daemon running at `<host:httpport>`. This command internally connects to `http://<host:httpport>/logLevel?log=<classname>&level=<level>` |
-
-Get/Set the log level for a Log identified by a qualified class name in the daemon.
-
-Example: `$ bin/yarn daemonlog -setlevel 127.0.0.1:8088 org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppImpl DEBUG`
+Get/Set the log level for a Log identified by a qualified class name in the daemon dynamically.
+See the Hadoop [Commands Manual](../../hadoop-project-dist/hadoop-common/CommandsManual.html#daemonlog) for more information.
 
 ### `nodemanager`
 
@@ -219,7 +189,7 @@ Usage:
 ```
   Usage: yarn rmadmin
      -refreshQueues
-     -refreshNodes [-g [timeout in seconds]]
+     -refreshNodes [-g|graceful [timeout in seconds] -client|server]
      -refreshNodesResources
      -refreshSuperUserGroupsConfiguration
      -refreshUserToGroupsMappings
@@ -228,7 +198,7 @@ Usage:
      -getGroups [username]
      -addToClusterNodeLabels <"label1(exclusive=true),label2(exclusive=false),label3">
      -removeFromClusterNodeLabels <label1,label2,label3> (label splitted by ",")
-     -replaceLabelsOnNode <"node1[:port]=label1,label2 node2[:port]=label1,label2">
+     -replaceLabelsOnNode <"node1[:port]=label1,label2 node2[:port]=label1,label2"> [-failOnUnknownNodes]
      -directlyAccessNodeLabelStore
      -refreshClusterMaxPriority
      -updateNodeResource [NodeID] [MemSize] [vCores] ([OvercommitTimeout])
@@ -236,6 +206,7 @@ Usage:
      -transitionToStandby <serviceId>
      -failover [--forcefence] [--forceactive] <serviceId> <serviceId>
      -getServiceState <serviceId>
+     -getAllServiceState
      -checkHealth <serviceId>
      -help [cmd]
 ```
@@ -243,7 +214,7 @@ Usage:
 | COMMAND\_OPTIONS | Description |
 |:---- |:---- |
 | -refreshQueues | Reload the queues' acls, states and scheduler specific properties. ResourceManager will reload the mapred-queues configuration file. |
-| -refreshNodes | Refresh the hosts information at the ResourceManager. |
+| -refreshNodes [-g&#124;graceful [timeout in seconds] -client&#124;server] | Refresh the hosts information at the ResourceManager. Here [-g&#124;graceful [timeout in seconds] -client&#124;server] is optional, if we specify the timeout then ResourceManager will wait for timeout before marking the NodeManager as decommissioned. The -client&#124;server indicates if the timeout tracking should be handled by the client or the ResourceManager. The client-side tracking is blocking, while the server-side tracking is not. Omitting the timeout, or a timeout of -1, indicates an infinite timeout. Known Issue: the server-side tracking will immediately decommission if an RM HA failover occurs. |
 | -refreshNodesResources | Refresh resources of NodeManagers at the ResourceManager. |
 | -refreshSuperUserGroupsConfiguration | Refresh superuser proxy groups mappings. |
 | -refreshUserToGroupsMappings | Refresh user-to-groups mappings. |
@@ -252,7 +223,7 @@ Usage:
 | -getGroups [username] | Get groups the specified user belongs to. |
 | -addToClusterNodeLabels <"label1(exclusive=true),label2(exclusive=false),label3"> | Add to cluster node labels. Default exclusivity is true. |
 | -removeFromClusterNodeLabels <label1,label2,label3> (label splitted by ",") | Remove from cluster node labels. |
-| -replaceLabelsOnNode <"node1[:port]=label1,label2 node2[:port]=label1,label2"> | Replace labels on nodes (please note that we do not support specifying multiple labels on a single host for now.) |
+| -replaceLabelsOnNode <"node1[:port]=label1,label2 node2[:port]=label1,label2"> [-failOnUnknownNodes]| Replace labels on nodes (please note that we do not support specifying multiple labels on a single host for now.) -failOnUnknownNodes is optional, when we set this option, it will fail if specified nodes are unknown.|
 | -directlyAccessNodeLabelStore | This is DEPRECATED, will be removed in future releases. Directly access node label store, with this option, all node label related operations will not connect RM. Instead, they will access/modify stored node labels directly. By default, it is false (access via RM). AND PLEASE NOTE: if you configured yarn.node-labels.fs-store.root-dir to a local directory (instead of NFS or HDFS), this option will only work when the command run on the machine where RM is running. |
 | -refreshClusterMaxPriority | Refresh cluster max priority |
 | -updateNodeResource [NodeID] [MemSize] [vCores] \([OvercommitTimeout]\) | Update resource on specific node. |
@@ -260,6 +231,7 @@ Usage:
 | -transitionToStandby [--forcemanual] \<serviceId\> | Transitions the service into Standby state. This command can not be used if automatic failover is enabled. Though you can override this by --forcemanual option, you need caution. |
 | -failover [--forceactive] \<serviceId1\> \<serviceId2\> | Initiate a failover from serviceId1 to serviceId2. Try to failover to the target service even if it is not ready if the --forceactive option is used. This command can not be used if automatic failover is enabled. |
 | -getServiceState \<serviceId\> | Returns the state of the service. |
+| -getAllServiceState | Returns the state of all the services. |
 | -checkHealth \<serviceId\> | Requests that the service perform a health check. The RMAdmin tool will exit with a non-zero exit code if the check fails. |
 | -help [cmd] | Displays help for the given command or all commands if none is specified. |
 

@@ -77,7 +77,9 @@ public class MiniQJMHACluster {
   public static MiniDFSNNTopology createDefaultTopology(int nns, int startingPort) {
     MiniDFSNNTopology.NSConf nameservice = new MiniDFSNNTopology.NSConf(NAMESERVICE);
     for (int i = 0; i < nns; i++) {
-      nameservice.addNN(new MiniDFSNNTopology.NNConf("nn" + i).setIpcPort(startingPort++)
+      nameservice.addNN(new MiniDFSNNTopology.NNConf("nn" + i)
+          .setIpcPort(startingPort++)
+          .setServicePort(startingPort++)
           .setHttpPort(startingPort++));
     }
 
@@ -101,6 +103,7 @@ public class MiniQJMHACluster {
         journalCluster = new MiniJournalCluster.Builder(conf).format(true)
             .build();
         journalCluster.waitActive();
+        journalCluster.setNamenodeSharedEditsConf(NAMESERVICE);
         URI journalURI = journalCluster.getQuorumJournalURI(NAMESERVICE);
 
         // start cluster with specified NameNodes
@@ -147,8 +150,9 @@ public class MiniQJMHACluster {
     int port = basePort;
     for (int i = 0; i < numNNs; i++) {
       nns.add("127.0.0.1:" + port);
-      // increment by 2 each time to account for the http port in the config setting
-      port += 2;
+      // increment by 3 each time to account for the http and the service port
+      // in the config setting
+      port += 3;
     }
 
     // use standard failover configurations

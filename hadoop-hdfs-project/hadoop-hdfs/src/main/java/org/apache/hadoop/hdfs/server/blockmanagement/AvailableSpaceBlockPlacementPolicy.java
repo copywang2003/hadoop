@@ -24,10 +24,13 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AVAILABLE_SPACE_
 import java.util.Collection;
 import java.util.Random;
 
+import com.google.common.base.Preconditions;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.net.DFSNetworkTopology;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.Node;
 
@@ -71,18 +74,40 @@ public class AvailableSpaceBlockPlacementPolicy extends
 
   @Override
   protected DatanodeDescriptor chooseDataNode(final String scope,
+      final Collection<Node> excludedNode, StorageType type) {
+    // only the code that uses DFSNetworkTopology should trigger this code path.
+    Preconditions.checkArgument(clusterMap instanceof DFSNetworkTopology);
+    DFSNetworkTopology dfsClusterMap = (DFSNetworkTopology)clusterMap;
+    DatanodeDescriptor a = (DatanodeDescriptor) dfsClusterMap
+        .chooseRandomWithStorageType(scope, excludedNode, type);
+    DatanodeDescriptor b = (DatanodeDescriptor) dfsClusterMap
+        .chooseRandomWithStorageType(scope, excludedNode, type);
+    return select(a, b);
+  }
+
+  @Override
+  protected DatanodeDescriptor chooseDataNode(final String scope,
       final Collection<Node> excludedNode) {
     DatanodeDescriptor a =
         (DatanodeDescriptor) clusterMap.chooseRandom(scope, excludedNode);
     DatanodeDescriptor b =
         (DatanodeDescriptor) clusterMap.chooseRandom(scope, excludedNode);
-    int ret = compareDataNode(a, b);
-    if (ret == 0) {
-      return a;
-    } else if (ret < 0) {
-      return (RAND.nextInt(100) < balancedPreference) ? a : b;
+    return select(a, b);
+  }
+
+  private DatanodeDescriptor select(
+      DatanodeDescriptor a, DatanodeDescriptor b) {
+    if (a != null && b != null){
+      int ret = compareDataNode(a, b);
+      if (ret == 0) {
+        return a;
+      } else if (ret < 0) {
+        return (RAND.nextInt(100) < balancedPreference) ? a : b;
+      } else {
+        return (RAND.nextInt(100) < balancedPreference) ? b : a;
+      }
     } else {
-      return (RAND.nextInt(100) < balancedPreference) ? b : a;
+      return a == null ? b : a;
     }
   }
 

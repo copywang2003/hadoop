@@ -19,13 +19,14 @@ package org.apache.hadoop.oncrpc.security;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.oncrpc.RpcCall;
 import org.apache.hadoop.oncrpc.XDR;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public abstract class SecurityHandler {
-  public static final Log LOG = LogFactory.getLog(SecurityHandler.class);
+  public static final Logger LOG =
+      LoggerFactory.getLogger(SecurityHandler.class);
   
   public abstract String getUser();
 
@@ -41,27 +42,51 @@ public abstract class SecurityHandler {
     return false;
   }
 
-  /** Used by GSS */
+  /**
+   * Used by GSS.
+   * @param request RPC request
+   * @param data request data
+   * @throws IOException fail to unwrap RPC call
+   * @return XDR response
+   */
   public XDR unwrap(RpcCall request, byte[] data ) throws IOException {
     throw new UnsupportedOperationException();
   }
   
-  /** Used by GSS */
+  /**
+   * Used by GSS.
+   * @param request RPC request
+   * @param response RPC response
+   * @throws IOException fail to wrap RPC call
+   * @return response byte buffer
+   */
   public byte[] wrap(RpcCall request, XDR response) throws IOException {
     throw new UnsupportedOperationException();
   }
   
-  /** Used by AUTH_SYS */
+  /**
+   * Used by AUTH_SYS.
+   * Return the uid of the NFS user credential.
+   * @return uid
+   */
   public int getUid() {
     throw new UnsupportedOperationException();
   }
   
-  /** Used by AUTH_SYS */
+  /**
+   * Used by AUTH_SYS.
+   * Return the gid of the NFS user credential.
+   * @return gid
+   */
   public int getGid() {
     throw new UnsupportedOperationException();
   }
 
-  /** Used by AUTH_SYS */
+  /**
+   * Used by AUTH_SYS.
+   * Return the auxiliary gids of the NFS user credential.
+   * @return auxiliary gids
+   */
   public int[] getAuxGids() {
     throw new UnsupportedOperationException();
   }

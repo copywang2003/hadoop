@@ -36,6 +36,7 @@ import org.apache.hadoop.ha.ServiceFailedException;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.HAUtil;
 import org.apache.hadoop.hdfs.server.namenode.CheckpointConf;
+import org.apache.hadoop.hdfs.server.namenode.CheckpointFaultInjector;
 import org.apache.hadoop.hdfs.server.namenode.FSImage;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeFile;
@@ -120,7 +121,7 @@ public class StandbyCheckpointer {
   
   private URL getHttpAddress(Configuration conf) throws IOException {
     final String scheme = DFSUtil.getHttpClientScheme(conf);
-    String defaultHost = NameNode.getServiceAddress(conf, true).getHostName();
+    String defaultHost = NameNode.getServiceAddress(conf).getHostName();
     URI addr = DFSUtil.getInfoServerWithDefaultHost(defaultHost, conf, scheme);
     return addr.toURL();
   }
@@ -172,7 +173,7 @@ public class StandbyCheckpointer {
       FSImage img = namesystem.getFSImage();
 
       long prevCheckpointTxId = img.getStorage().getMostRecentCheckpointTxId();
-      long thisCheckpointTxId = img.getLastAppliedOrWrittenTxId();
+      long thisCheckpointTxId = img.getCorrectLastAppliedOrWrittenTxId();
       assert thisCheckpointTxId >= prevCheckpointTxId;
       if (thisCheckpointTxId == prevCheckpointTxId) {
         LOG.info("A checkpoint was triggered but the Standby Node has not " +
@@ -197,7 +198,12 @@ public class StandbyCheckpointer {
       // Save the legacy OIV image, if the output dir is defined.
       String outputDir = checkpointConf.getLegacyOivImageDir();
       if (outputDir != null && !outputDir.isEmpty()) {
-        img.saveLegacyOIVImage(namesystem, outputDir, canceler);
+        try {
+          img.saveLegacyOIVImage(namesystem, outputDir, canceler);
+        } catch (IOException ioe) {
+          LOG.warn("Exception encountered while saving legacy OIV image; "
+                  + "continuing with other checkpointing steps", ioe);
+        }
       }
     } finally {
       namesystem.cpUnlock();
@@ -223,7 +229,9 @@ public class StandbyCheckpointer {
       Future<TransferFsImage.TransferResult> upload =
           executor.submit(new Callable<TransferFsImage.TransferResult>() {
             @Override
-            public TransferFsImage.TransferResult call() throws IOException {
+            public TransferFsImage.TransferResult call()
+                throws IOException, InterruptedException {
+              CheckpointFaultInjector.getInstance().duringUploadInProgess();
               return TransferFsImage.uploadImageFromStorage(activeNNAddress, conf, namesystem
                   .getFSImage().getStorage(), imageType, txid, canceler);
             }
@@ -253,11 +261,12 @@ public class StandbyCheckpointer {
         break;
       }
     }
-    lastUploadTime = monotonicNow();
-
-    // we are primary if we successfully updated the ANN
-    this.isPrimaryCheckPointer = success;
-
+    if (ie == null && ioe == null) {
+      //Update only when response from remote about success or
+      lastUploadTime = monotonicNow();
+      // we are primary if we successfully updated the ANN
+      this.isPrimaryCheckPointer = success;
+    }
     // cleaner than copying code for multiple catch statements and better than catching all
     // exceptions, so we just handle the ones we expect.
     if (ie != null || ioe != null) {
@@ -315,7 +324,7 @@ public class StandbyCheckpointer {
 
   private long countUncheckpointedTxns() {
     FSImage img = namesystem.getFSImage();
-    return img.getLastAppliedOrWrittenTxId() -
+    return img.getCorrectLastAppliedOrWrittenTxId() -
       img.getStorage().getMostRecentCheckpointTxId();
   }
 

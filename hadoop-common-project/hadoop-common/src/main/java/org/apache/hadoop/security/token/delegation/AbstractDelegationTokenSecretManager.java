@@ -21,7 +21,7 @@ package org.apache.hadoop.security.token.delegation;
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.util.Arrays;
+import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -30,8 +30,6 @@ import java.util.Set;
 
 import javax.crypto.SecretKey;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.io.Text;
@@ -43,15 +41,21 @@ import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.Time;
 
 import com.google.common.base.Preconditions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-@InterfaceAudience.LimitedPrivate({"HDFS", "MapReduce", "Hive"})
+@InterfaceAudience.Public
 @InterfaceStability.Evolving
 public abstract 
 class AbstractDelegationTokenSecretManager<TokenIdent 
 extends AbstractDelegationTokenIdentifier> 
    extends SecretManager<TokenIdent> {
-  private static final Log LOG = LogFactory
-      .getLog(AbstractDelegationTokenSecretManager.class);
+  private static final Logger LOG = LoggerFactory
+      .getLogger(AbstractDelegationTokenSecretManager.class);
+
+  private String formatTokenId(TokenIdent id) {
+    return "(" + id + ")";
+  }
 
   /** 
    * Cache of currently valid tokens, mapping from DelegationTokenIdentifier 
@@ -312,7 +316,8 @@ extends AbstractDelegationTokenIdentifier>
     int keyId = identifier.getMasterKeyId();
     DelegationKey dKey = allKeys.get(keyId);
     if (dKey == null) {
-      LOG.warn("No KEY found for persisted identifier " + identifier.toString());
+      LOG.warn("No KEY found for persisted identifier "
+          + formatTokenId(identifier));
       return;
     }
     byte[] password = createPassword(identifier.getBytes(), dKey.getKey());
@@ -323,7 +328,8 @@ extends AbstractDelegationTokenIdentifier>
       currentTokens.put(identifier, new DelegationTokenInformation(renewDate,
           password, getTrackingIdIfEnabled(identifier)));
     } else {
-      throw new IOException("Same delegation token being added twice.");
+      throw new IOException("Same delegation token being added twice: "
+          + formatTokenId(identifier));
     }
   }
 
@@ -393,7 +399,7 @@ extends AbstractDelegationTokenIdentifier>
     identifier.setMaxDate(now + tokenMaxLifetime);
     identifier.setMasterKeyId(currentKey.getKeyId());
     identifier.setSequenceNumber(sequenceNum);
-    LOG.info("Creating password for identifier: " + identifier
+    LOG.info("Creating password for identifier: " + formatTokenId(identifier)
         + ", currentKey: " + currentKey.getKeyId());
     byte[] password = createPassword(identifier.getBytes(), currentKey.getKey());
     DelegationTokenInformation tokenInfo = new DelegationTokenInformation(now
@@ -401,7 +407,8 @@ extends AbstractDelegationTokenIdentifier>
     try {
       storeToken(identifier, tokenInfo);
     } catch (IOException ioe) {
-      LOG.error("Could not store token !!", ioe);
+      LOG.error("Could not store token " + formatTokenId(identifier) + "!!",
+          ioe);
     }
     return password;
   }
@@ -418,11 +425,14 @@ extends AbstractDelegationTokenIdentifier>
     assert Thread.holdsLock(this);
     DelegationTokenInformation info = getTokenInfo(identifier);
     if (info == null) {
-      throw new InvalidToken("token (" + identifier.toString()
-          + ") can't be found in cache");
+      throw new InvalidToken("token " + formatTokenId(identifier)
+          + " can't be found in cache");
     }
-    if (info.getRenewDate() < Time.now()) {
-      throw new InvalidToken("token (" + identifier.toString() + ") is expired");
+    long now = Time.now();
+    if (info.getRenewDate() < now) {
+      throw new InvalidToken("token " + formatTokenId(identifier) + " is " +
+          "expired, current time: " + Time.formatTime(now) +
+          " expected renewal time: " + Time.formatTime(info.getRenewDate()));
     }
     return info;
   }
@@ -457,9 +467,9 @@ extends AbstractDelegationTokenIdentifier>
   public synchronized void verifyToken(TokenIdent identifier, byte[] password)
       throws InvalidToken {
     byte[] storedPassword = retrievePassword(identifier);
-    if (!Arrays.equals(password, storedPassword)) {
-      throw new InvalidToken("token (" + identifier
-          + ") is invalid, password doesn't match");
+    if (!MessageDigest.isEqual(password, storedPassword)) {
+      throw new InvalidToken("token " + formatTokenId(identifier)
+          + " is invalid, password doesn't match");
     }
   }
   
@@ -477,32 +487,39 @@ extends AbstractDelegationTokenIdentifier>
     DataInputStream in = new DataInputStream(buf);
     TokenIdent id = createIdentifier();
     id.readFields(in);
-    LOG.info("Token renewal for identifier: " + id + "; total currentTokens "
-        +  currentTokens.size());
+    LOG.info("Token renewal for identifier: " + formatTokenId(id)
+        + "; total currentTokens " +  currentTokens.size());
 
     long now = Time.now();
     if (id.getMaxDate() < now) {
-      throw new InvalidToken(renewer + " tried to renew an expired token");
+      throw new InvalidToken(renewer + " tried to renew an expired token "
+          + formatTokenId(id) + " max expiration date: "
+          + Time.formatTime(id.getMaxDate())
+          + " currentTime: " + Time.formatTime(now));
     }
     if ((id.getRenewer() == null) || (id.getRenewer().toString().isEmpty())) {
       throw new AccessControlException(renewer +
-          " tried to renew a token without a renewer");
+          " tried to renew a token " + formatTokenId(id)
+          + " without a renewer");
     }
     if (!id.getRenewer().toString().equals(renewer)) {
-      throw new AccessControlException(renewer +
-          " tries to renew a token with renewer " + id.getRenewer());
+      throw new AccessControlException(renewer
+          + " tries to renew a token " + formatTokenId(id)
+          + " with non-matching renewer " + id.getRenewer());
     }
     DelegationKey key = getDelegationKey(id.getMasterKeyId());
     if (key == null) {
       throw new InvalidToken("Unable to find master key for keyId="
           + id.getMasterKeyId()
-          + " from cache. Failed to renew an unexpired token"
-          + " with sequenceNumber=" + id.getSequenceNumber());
+          + " from cache. Failed to renew an unexpired token "
+          + formatTokenId(id) + " with sequenceNumber="
+          + id.getSequenceNumber());
     }
     byte[] password = createPassword(token.getIdentifier(), key.getKey());
-    if (!Arrays.equals(password, token.getPassword())) {
-      throw new AccessControlException(renewer +
-          " is trying to renew a token with wrong password");
+    if (!MessageDigest.isEqual(password, token.getPassword())) {
+      throw new AccessControlException(renewer
+          + " is trying to renew a token "
+          + formatTokenId(id) + " with wrong password");
     }
     long renewTime = Math.min(id.getMaxDate(), now + tokenRenewInterval);
     String trackingId = getTrackingIdIfEnabled(id);
@@ -510,7 +527,8 @@ extends AbstractDelegationTokenIdentifier>
         password, trackingId);
 
     if (getTokenInfo(id) == null) {
-      throw new InvalidToken("Renewal request for unknown token");
+      throw new InvalidToken("Renewal request for unknown token "
+          + formatTokenId(id));
     }
     updateToken(id, info);
     return renewTime;
@@ -528,10 +546,11 @@ extends AbstractDelegationTokenIdentifier>
     DataInputStream in = new DataInputStream(buf);
     TokenIdent id = createIdentifier();
     id.readFields(in);
-    LOG.info("Token cancelation requested for identifier: "+id);
+    LOG.info("Token cancellation requested for identifier: "
+        + formatTokenId(id));
     
     if (id.getUser() == null) {
-      throw new InvalidToken("Token with no owner");
+      throw new InvalidToken("Token with no owner " + formatTokenId(id));
     }
     String owner = id.getUser().getUserName();
     Text renewer = id.getRenewer();
@@ -541,11 +560,11 @@ extends AbstractDelegationTokenIdentifier>
         && (renewer == null || renewer.toString().isEmpty() || !cancelerShortName
             .equals(renewer.toString()))) {
       throw new AccessControlException(canceller
-          + " is not authorized to cancel the token");
+          + " is not authorized to cancel the token " + formatTokenId(id));
     }
     DelegationTokenInformation info = currentTokens.remove(id);
     if (info == null) {
-      throw new InvalidToken("Token not found");
+      throw new InvalidToken("Token not found " + formatTokenId(id));
     }
     removeStoredToken(id);
     return id;
@@ -610,6 +629,7 @@ extends AbstractDelegationTokenIdentifier>
     // don't hold lock on 'this' to avoid edit log updates blocking token ops
     for (TokenIdent ident : expiredTokens) {
       logExpireToken(ident);
+      LOG.info("Removing expired token " + formatTokenId(ident));
       removeStoredToken(ident);
     }
   }

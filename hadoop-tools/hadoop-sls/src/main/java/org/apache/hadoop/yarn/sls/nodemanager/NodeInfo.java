@@ -36,7 +36,7 @@ import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceUtilization;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatResponse;
-import org.apache.hadoop.yarn.server.api.records.QueuedContainersStatus;
+import org.apache.hadoop.yarn.server.api.records.OpportunisticContainersStatus;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode
@@ -179,7 +179,7 @@ public class NodeInfo {
     }
 
     @Override
-    public void updateNodeHeartbeatResponseForContainersDecreasing(
+    public void updateNodeHeartbeatResponseForUpdatedContainers(
         NodeHeartbeatResponse response) {
       // TODO Auto-generated method stub
       
@@ -191,7 +191,7 @@ public class NodeInfo {
       return null;
     }
 
-    public QueuedContainersStatus getQueuedContainersStatus() {
+    public OpportunisticContainersStatus getOpportunisticContainersStatus() {
       return null;
     }
 
@@ -212,6 +212,16 @@ public class NodeInfo {
 
     @Override
     public void setUntrackedTimeStamp(long timeStamp) {
+    }
+
+    @Override
+    public Integer getDecommissioningTimeout() {
+      return null;
+    }
+
+    @Override
+    public Resource getPhysicalResource() {
+      return null;
     }
   }
 

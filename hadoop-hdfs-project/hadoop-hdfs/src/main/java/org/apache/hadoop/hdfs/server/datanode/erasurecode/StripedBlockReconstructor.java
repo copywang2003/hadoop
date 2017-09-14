@@ -21,6 +21,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.hdfs.server.datanode.metrics.DataNodeMetrics;
+import org.apache.hadoop.util.Time;
 
 /**
  * StripedBlockReconstructor reconstruct one or more missed striped block in
@@ -47,8 +49,9 @@ class StripedBlockReconstructor extends StripedReconstructor
 
   @Override
   public void run() {
-    getDatanode().incrementXmitsInProgress();
     try {
+      initDecoderIfNecessary();
+
       getStripedReader().init();
 
       stripedWriter.init();
@@ -63,10 +66,15 @@ class StripedBlockReconstructor extends StripedReconstructor
       LOG.warn("Failed to reconstruct striped block: {}", getBlockGroup(), e);
       getDatanode().getMetrics().incrECFailedReconstructionTasks();
     } finally {
-      getDatanode().decrementXmitsInProgress();
-      getDatanode().getMetrics().incrECReconstructionTasks();
+      getDatanode().decrementXmitsInProgress(getXmits());
+      final DataNodeMetrics metrics = getDatanode().getMetrics();
+      metrics.incrECReconstructionTasks();
+      metrics.incrECReconstructionBytesRead(getBytesRead());
+      metrics.incrECReconstructionRemoteBytesRead(getRemoteBytesRead());
+      metrics.incrECReconstructionBytesWritten(getBytesWritten());
       getStripedReader().close();
       stripedWriter.close();
+      cleanup();
     }
   }
 
@@ -76,18 +84,28 @@ class StripedBlockReconstructor extends StripedReconstructor
       final int toReconstructLen =
           (int) Math.min(getStripedReader().getBufferSize(), remaining);
 
+      long start = Time.monotonicNow();
       // step1: read from minimum source DNs required for reconstruction.
       // The returned success list is the source DNs we do real read from
       getStripedReader().readMinimumSources(toReconstructLen);
+      long readEnd = Time.monotonicNow();
 
       // step2: decode to reconstruct targets
       reconstructTargets(toReconstructLen);
+      long decodeEnd = Time.monotonicNow();
 
       // step3: transfer data
       if (stripedWriter.transferData2Targets() == 0) {
         String error = "Transfer failed for all targets.";
         throw new IOException(error);
       }
+      long writeEnd = Time.monotonicNow();
+
+      // Only the succeed reconstructions are recorded.
+      final DataNodeMetrics metrics = getDatanode().getMetrics();
+      metrics.incrECReconstructionReadTime(readEnd - start);
+      metrics.incrECReconstructionDecodingTime(decodeEnd - readEnd);
+      metrics.incrECReconstructionWriteTime(writeEnd - decodeEnd);
 
       updatePositionInBlock(toReconstructLen);
 
@@ -96,14 +114,15 @@ class StripedBlockReconstructor extends StripedReconstructor
   }
 
   private void reconstructTargets(int toReconstructLen) {
-    initDecoderIfNecessary();
-
     ByteBuffer[] inputs = getStripedReader().getInputBuffers(toReconstructLen);
 
     int[] erasedIndices = stripedWriter.getRealTargetIndices();
     ByteBuffer[] outputs = stripedWriter.getRealTargetBuffers(toReconstructLen);
 
+    long start = System.nanoTime();
     getDecoder().decode(inputs, erasedIndices, outputs);
+    long end = System.nanoTime();
+    this.getDatanode().getMetrics().incrECDecodingTime(end - start);
 
     stripedWriter.updateRealTargetBuffers(toReconstructLen);
   }

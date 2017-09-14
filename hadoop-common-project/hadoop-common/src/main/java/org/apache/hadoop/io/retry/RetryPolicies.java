@@ -32,8 +32,6 @@ import java.util.Map.Entry;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.ipc.RetriableException;
 import org.apache.hadoop.ipc.StandbyException;
@@ -41,6 +39,8 @@ import org.apache.hadoop.net.ConnectTimeoutException;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 
 import com.google.common.annotations.VisibleForTesting;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * <p>
@@ -49,7 +49,7 @@ import com.google.common.annotations.VisibleForTesting;
  */
 public class RetryPolicies {
   
-  public static final Log LOG = LogFactory.getLog(RetryPolicies.class);
+  public static final Logger LOG = LoggerFactory.getLogger(RetryPolicies.class);
   
   /**
    * <p>
@@ -182,6 +182,20 @@ public class RetryPolicies {
         boolean isIdempotentOrAtMostOnce) throws Exception {
       return new RetryAction(RetryAction.RetryDecision.FAIL, 0, "try once " +
           "and fail.");
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (obj == this) {
+        return true;
+      } else {
+        return obj != null && obj.getClass() == this.getClass();
+      }
+    }
+
+    @Override
+    public int hashCode() {
+      return this.getClass().hashCode();
     }
   }
 
@@ -669,7 +683,8 @@ public class RetryPolicies {
       } else if (e instanceof SocketException
           || (e instanceof IOException && !(e instanceof RemoteException))) {
         if (isIdempotentOrAtMostOnce) {
-          return RetryAction.FAILOVER_AND_RETRY;
+          return new RetryAction(RetryAction.RetryDecision.FAILOVER_AND_RETRY,
+              getFailoverOrRetrySleepTime(retries));
         } else {
           return new RetryAction(RetryAction.RetryDecision.FAIL, 0,
               "the invoked method is not idempotent, and unable to determine "

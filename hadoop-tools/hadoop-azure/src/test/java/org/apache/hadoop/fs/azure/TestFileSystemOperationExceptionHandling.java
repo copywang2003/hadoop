@@ -31,8 +31,8 @@ import org.junit.Assert;
 import org.junit.Test;
 
 
-public class TestFileSystemOperationExceptionHandling extends
-  NativeAzureFileSystemBaseTest {
+public class TestFileSystemOperationExceptionHandling
+    extends AbstractWasbTestBase {
 
   private FSDataInputStream inputStream = null;
 
@@ -94,6 +94,7 @@ public class TestFileSystemOperationExceptionHandling extends
     AzureBlobStorageTestAccount testAccount = createTestAccount();
     setupInputStreamToTest(testAccount);
     inputStream.seek(5);
+    inputStream.read();
   }
 
   /*

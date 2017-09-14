@@ -21,7 +21,7 @@ import static org.junit.Assert.*;
 
 import java.security.NoSuchAlgorithmException;
 
-import org.apache.commons.logging.impl.Log4JLogger;
+import com.google.common.base.Supplier;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.ha.HAServiceProtocol.StateChangeRequestInfo;
@@ -29,7 +29,6 @@ import org.apache.hadoop.ha.HealthMonitor.State;
 import org.apache.hadoop.ha.MiniZKFCCluster.DummyZKFC;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.Time;
-import org.apache.log4j.Level;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.data.Stat;
@@ -40,6 +39,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
 import org.mockito.Mockito;
+import org.slf4j.event.Level;
 
 public class TestZKFailoverController extends ClientBaseWithFixes {
   private Configuration conf;
@@ -70,7 +70,7 @@ public class TestZKFailoverController extends ClientBaseWithFixes {
     "digest:" + DIGEST_USER_HASH + ":rwcda";
   
   static {
-    ((Log4JLogger)ActiveStandbyElector.LOG).getLogger().setLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(ActiveStandbyElector.LOG, Level.TRACE);
   }
   
   @Before
@@ -441,12 +441,16 @@ public class TestZKFailoverController extends ClientBaseWithFixes {
     cluster.getService(0).getZKFCProxy(conf, 5000).gracefulFailover();
     cluster.waitForActiveLockHolder(0);
 
-    Thread.sleep(10000); // allow to quiesce
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return cluster.getService(0).fenceCount == 0 &&
+            cluster.getService(1).fenceCount == 0 &&
+            cluster.getService(0).activeTransitionCount == 2 &&
+            cluster.getService(1).activeTransitionCount == 1;
+      }
+    }, 100, 60 * 1000);
 
-    assertEquals(0, cluster.getService(0).fenceCount);
-    assertEquals(0, cluster.getService(1).fenceCount);
-    assertEquals(2, cluster.getService(0).activeTransitionCount);
-    assertEquals(1, cluster.getService(1).activeTransitionCount);
   }
 
   @Test
@@ -590,14 +594,17 @@ public class TestZKFailoverController extends ClientBaseWithFixes {
     cluster.getService(0).getZKFCProxy(conf, 5000).gracefulFailover();
     cluster.waitForActiveLockHolder(0);
 
-    Thread.sleep(10000); // allow to quiesce
-
-    assertEquals(0, cluster.getService(0).fenceCount);
-    assertEquals(0, cluster.getService(1).fenceCount);
-    assertEquals(0, cluster.getService(2).fenceCount);
-    assertEquals(2, cluster.getService(0).activeTransitionCount);
-    assertEquals(1, cluster.getService(1).activeTransitionCount);
-    assertEquals(1, cluster.getService(2).activeTransitionCount);
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return cluster.getService(0).fenceCount == 0 &&
+            cluster.getService(1).fenceCount == 0 &&
+            cluster.getService(2).fenceCount == 0 &&
+            cluster.getService(0).activeTransitionCount == 2 &&
+            cluster.getService(1).activeTransitionCount == 1 &&
+            cluster.getService(2).activeTransitionCount == 1;
+      }
+    }, 100, 60 * 1000);
   }
 
   private int runFC(DummyHAService target, String ... args) throws Exception {

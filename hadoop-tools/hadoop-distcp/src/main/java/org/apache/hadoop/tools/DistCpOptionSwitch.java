@@ -81,7 +81,7 @@ public enum DistCpOptionSwitch {
   NUM_LISTSTATUS_THREADS(DistCpConstants.CONF_LABEL_LISTSTATUS_THREADS,
       new Option("numListstatusThreads", true, "Number of threads to " +
           "use for building file listing (max " +
-          DistCpOptions.maxNumListstatusThreads + ").")),
+          DistCpOptions.MAX_NUM_LISTSTATUS_THREADS + ").")),
   /**
    * Max number of maps to use during copy. DistCp will split work
    * as equally as possible among these maps
@@ -119,6 +119,13 @@ public enum DistCpOptionSwitch {
       new Option("log", true, "Folder on DFS where distcp execution logs are saved")),
 
   /**
+   * Log additional info (path, size) in the SKIP/COPY log.
+   */
+  VERBOSE_LOG(DistCpConstants.CONF_LABEL_VERBOSE_LOG,
+      new Option("v", false,
+          "Log additional info (path, size) in the SKIP/COPY log")),
+
+  /**
    * Copy strategy is use. This could be dynamic or uniform size etc.
    * DistCp would use an appropriate input format based on this.
    */
@@ -150,6 +157,11 @@ public enum DistCpOptionSwitch {
       "Use snapshot diff report to identify the difference between source and target"),
       2),
 
+  RDIFF(DistCpConstants.CONF_LABEL_RDIFF,
+      new Option("rdiff", false,
+      "Use target snapshot diff report to identify changes made on target"),
+      2),
+
   /**
    * Should DisctpExecution be blocking
    */
@@ -163,6 +175,24 @@ public enum DistCpOptionSwitch {
   SIZE_LIMIT("",
       new Option("sizelimit", true, "(Deprecated!) Limit number of files " +
               "copied to <= n bytes")),
+
+  BLOCKS_PER_CHUNK("",
+      new Option("blocksperchunk", true, "If set to a positive value, files"
+          + "with more blocks than this value will be split into chunks of "
+          + "<blocksperchunk> blocks to be transferred in parallel, and "
+          + "reassembled on the destination. By default, <blocksperchunk> is "
+          + "0 and the files will be transmitted in their entirety without "
+          + "splitting. This switch is only applicable when the source file "
+          + "system implements getBlockLocations method and the target file "
+          + "system implements concat method")),
+
+  /**
+   * Configurable copy buffer size.
+   */
+  COPY_BUFFER_SIZE(DistCpConstants.CONF_LABEL_COPY_BUFFER_SIZE,
+      new Option("copybuffersize", true, "Size of the copy buffer to use. "
+          + "By default <copybuffersize> is "
+          + DistCpConstants.COPY_BUFFER_SIZE_DEFAULT + "B.")),
 
   /**
    * Specify bandwidth per map in MB, accepts bandwidth as a fraction

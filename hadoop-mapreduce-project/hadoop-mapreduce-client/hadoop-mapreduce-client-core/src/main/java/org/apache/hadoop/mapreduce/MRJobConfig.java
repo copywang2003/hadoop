@@ -57,11 +57,6 @@ public interface MRJobConfig {
   // negative values disable the limit
   public static final long DEFAULT_TASK_LOCAL_WRITE_LIMIT_BYTES = -1;
 
-  public static final String TASK_PROGRESS_REPORT_INTERVAL =
-      "mapreduce.task.progress-report.interval";
-  /** The number of milliseconds between progress reports. */
-  public static final int DEFAULT_TASK_PROGRESS_REPORT_INTERVAL = 3000;
-
   public static final String JAR = "mapreduce.job.jar";
 
   public static final String ID = "mapreduce.job.id";
@@ -95,6 +90,12 @@ public interface MRJobConfig {
    * Node Label expression applicable for reduce containers.
    */
   public static final String REDUCE_NODE_LABEL_EXP = "mapreduce.reduce.node-label-expression";
+
+  /**
+   * Specify strict locality on a comma-separated list of racks and/or nodes.
+   * Syntax: /rack or /rack/node or node (assumes /default-rack)
+   */
+  public static final String AM_STRICT_LOCALITY = "mapreduce.job.am.strict-locality";
 
   public static final String RESERVATION_ID = "mapreduce.job.reservation.id";
 
@@ -220,7 +221,11 @@ public interface MRJobConfig {
 
   public static final String IO_SORT_FACTOR = "mapreduce.task.io.sort.factor";
 
+  public static final int DEFAULT_IO_SORT_FACTOR = 10;
+
   public static final String IO_SORT_MB = "mapreduce.task.io.sort.mb";
+
+  public static final int DEFAULT_IO_SORT_MB = 100;
 
   public static final String INDEX_CACHE_MEMORY_LIMIT = "mapreduce.task.index.cache.limit.bytes";
 
@@ -258,6 +263,10 @@ public interface MRJobConfig {
   public static final String TASK_REDUCE_PROFILE_PARAMS = "mapreduce.task.profile.reduce.params";
   
   public static final String TASK_TIMEOUT = "mapreduce.task.timeout";
+  long DEFAULT_TASK_TIMEOUT_MILLIS = 5 * 60 * 1000L;
+
+  String TASK_PROGRESS_REPORT_INTERVAL =
+      "mapreduce.task.progress-report.interval";
 
   public static final String TASK_TIMEOUT_CHECK_INTERVAL_MS = "mapreduce.task.timeout.check-interval-ms";
 
@@ -315,7 +324,13 @@ public interface MRJobConfig {
 
   public static final String MAP_OUTPUT_VALUE_CLASS = "mapreduce.map.output.value.class";
 
-  public static final String MAP_OUTPUT_KEY_FIELD_SEPERATOR = "mapreduce.map.output.key.field.separator";
+  public static final String MAP_OUTPUT_KEY_FIELD_SEPARATOR = "mapreduce.map.output.key.field.separator";
+
+  /**
+   * @deprecated Use {@link #MAP_OUTPUT_KEY_FIELD_SEPARATOR}
+   */
+  @Deprecated
+  public static final String MAP_OUTPUT_KEY_FIELD_SEPERATOR = MAP_OUTPUT_KEY_FIELD_SEPARATOR;
 
   public static final String MAP_LOG_LEVEL = "mapreduce.map.log.level";
 
@@ -416,7 +431,7 @@ public interface MRJobConfig {
   public static final String JOB_ACL_MODIFY_JOB = "mapreduce.job.acl-modify-job";
 
   public static final String DEFAULT_JOB_ACL_MODIFY_JOB = " ";
-  
+
   public static final String JOB_RUNNING_MAP_LIMIT =
       "mapreduce.job.running.map.limit";
   public static final int DEFAULT_JOB_RUNNING_MAP_LIMIT = 0;
@@ -506,7 +521,7 @@ public interface MRJobConfig {
    */
   public static final String MR_CLIENT_JOB_MAX_RETRIES =
       MR_PREFIX + "client.job.max-retries";
-  public static final int DEFAULT_MR_CLIENT_JOB_MAX_RETRIES = 0;
+  public static final int DEFAULT_MR_CLIENT_JOB_MAX_RETRIES = 3;
 
   /**
    * How long to wait between jobclient retries on failure
@@ -589,7 +604,13 @@ public interface MRJobConfig {
    */
   public static final String MR_AM_JOB_CLIENT_PORT_RANGE = 
     MR_AM_PREFIX + "job.client.port-range";
-  
+
+  /**
+   * Range of ports that the MapReduce AM can use when binding for its webapp.
+   * Leave blank if you want all possible ports.
+   */
+  String MR_AM_WEBAPP_PORT_RANGE = MR_AM_PREFIX + "webapp.port-range";
+
   /** Enable blacklisting of nodes in the job.*/
   public static final String MR_AM_JOB_NODE_BLACKLISTING_ENABLE = 
     MR_AM_PREFIX  + "job.node-blacklisting.enable";
@@ -967,6 +988,34 @@ public interface MRJobConfig {
           128;
 
   /**
+   * The maximum number of resources a map reduce job is allowed to submit for
+   * localization via files, libjars, archives, and jobjar command line
+   * arguments and through the distributed cache. If set to 0 the limit is
+   * ignored.
+   */
+  String MAX_RESOURCES = "mapreduce.job.cache.limit.max-resources";
+  int MAX_RESOURCES_DEFAULT = 0;
+
+  /**
+   * The maximum size (in MB) a map reduce job is allowed to submit for
+   * localization via files, libjars, archives, and jobjar command line
+   * arguments and through the distributed cache. If set to 0 the limit is
+   * ignored.
+   */
+  String MAX_RESOURCES_MB = "mapreduce.job.cache.limit.max-resources-mb";
+  long MAX_RESOURCES_MB_DEFAULT = 0;
+
+  /**
+   * The maximum size (in MB) of a single resource a map reduce job is allow to
+   * submit for localization via files, libjars, archives, and jobjar command
+   * line arguments and through the distributed cache. If set to 0 the limit is
+   * ignored.
+   */
+  String MAX_SINGLE_RESOURCE_MB =
+      "mapreduce.job.cache.limit.max-single-resource-mb";
+  long MAX_SINGLE_RESOURCE_MB_DEFAULT = 0;
+
+  /**
    * Number of OPPORTUNISTIC Containers per 100 containers that will be
    * requested by the MRAppMaster. The Default value is 0, which implies all
    * maps will be guaranteed. A value of 100 means all maps will be requested
@@ -974,7 +1023,18 @@ public interface MRJobConfig {
    * requested by the AM will be opportunistic. If the total number of maps
    * for the job is less than 'x', then ALL maps will be OPPORTUNISTIC
    */
-  public static final String MR_NUM_OPPORTUNISTIC_MAPS_PER_100 =
-      "mapreduce.job.num-opportunistic-maps-per-100";
-  public static final int DEFAULT_MR_NUM_OPPORTUNISTIC_MAPS_PER_100 = 0;
+  public static final String MR_NUM_OPPORTUNISTIC_MAPS_PERCENT =
+      "mapreduce.job.num-opportunistic-maps-percent";
+  public static final int DEFAULT_MR_NUM_OPPORTUNISTIC_MAPS_PERCENT = 0;
+
+  /**
+   * A comma-separated list of properties whose value will be redacted.
+   */
+  String MR_JOB_REDACTED_PROPERTIES = "mapreduce.job.redacted-properties";
+
+  String MR_JOB_SEND_TOKEN_CONF = "mapreduce.job.send-token-conf";
+
+  String FINISH_JOB_WHEN_REDUCERS_DONE =
+      "mapreduce.job.finish-when-all-reducers-done";
+  boolean DEFAULT_FINISH_JOB_WHEN_REDUCERS_DONE = true;
 }

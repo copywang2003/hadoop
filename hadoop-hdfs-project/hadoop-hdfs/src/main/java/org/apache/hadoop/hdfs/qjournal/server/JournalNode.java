@@ -17,6 +17,8 @@
  */
 package org.apache.hadoop.hdfs.qjournal.server;
 
+import static org.apache.hadoop.util.ExitUtil.terminate;
+
 import java.io.File;
 import java.io.FileFilter;
 import java.io.IOException;
@@ -49,7 +51,7 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.htrace.core.Tracer;
-import org.mortbay.util.ajax.JSON;
+import org.eclipse.jetty.util.ajax.JSON;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
@@ -68,6 +70,8 @@ public class JournalNode implements Tool, Configurable, JournalNodeMXBean {
   private JournalNodeRpcServer rpcServer;
   private JournalNodeHttpServer httpServer;
   private final Map<String, Journal> journalsById = Maps.newHashMap();
+  private final Map<String, JournalNodeSyncer> journalSyncersById = Maps
+      .newHashMap();
   private ObjectName journalNodeInfoBeanName;
   private String httpServerURI;
   private File localDir;
@@ -92,9 +96,22 @@ public class JournalNode implements Tool, Configurable, JournalNodeMXBean {
       LOG.info("Initializing journal in directory " + logDir);      
       journal = new Journal(conf, logDir, jid, startOpt, new ErrorReporter());
       journalsById.put(jid, journal);
+
+      // Start SyncJouranl thread, if JournalNode Sync is enabled
+      if (conf.getBoolean(
+          DFSConfigKeys.DFS_JOURNALNODE_ENABLE_SYNC_KEY,
+          DFSConfigKeys.DFS_JOURNALNODE_ENABLE_SYNC_DEFAULT)) {
+        startSyncer(journal, jid);
+      }
     }
-    
+
     return journal;
+  }
+
+  private void startSyncer(Journal journal, String jid) {
+    JournalNodeSyncer jSyncer = new JournalNodeSyncer(this, journal, jid, conf);
+    journalSyncersById.put(jid, jSyncer);
+    jSyncer.start();
   }
 
   @VisibleForTesting
@@ -140,27 +157,36 @@ public class JournalNode implements Tool, Configurable, JournalNodeMXBean {
    */
   public void start() throws IOException {
     Preconditions.checkState(!isStarted(), "JN already running");
-    
-    validateAndCreateJournalDir(localDir);
-    
-    DefaultMetricsSystem.initialize("JournalNode");
-    JvmMetrics.create("JournalNode",
-        conf.get(DFSConfigKeys.DFS_METRICS_SESSION_ID_KEY),
-        DefaultMetricsSystem.instance());
 
-    InetSocketAddress socAddr = JournalNodeRpcServer.getAddress(conf);
-    SecurityUtil.login(conf, DFSConfigKeys.DFS_JOURNALNODE_KEYTAB_FILE_KEY,
-        DFSConfigKeys.DFS_JOURNALNODE_KERBEROS_PRINCIPAL_KEY, socAddr.getHostName());
-    
-    registerJNMXBean();
-    
-    httpServer = new JournalNodeHttpServer(conf, this);
-    httpServer.start();
+    try {
 
-    httpServerURI = httpServer.getServerURI().toString();
+      validateAndCreateJournalDir(localDir);
 
-    rpcServer = new JournalNodeRpcServer(conf, this);
-    rpcServer.start();
+      DefaultMetricsSystem.initialize("JournalNode");
+      JvmMetrics.create("JournalNode",
+          conf.get(DFSConfigKeys.DFS_METRICS_SESSION_ID_KEY),
+          DefaultMetricsSystem.instance());
+
+      InetSocketAddress socAddr = JournalNodeRpcServer.getAddress(conf);
+      SecurityUtil.login(conf, DFSConfigKeys.DFS_JOURNALNODE_KEYTAB_FILE_KEY,
+          DFSConfigKeys.DFS_JOURNALNODE_KERBEROS_PRINCIPAL_KEY,
+          socAddr.getHostName());
+
+      registerJNMXBean();
+
+      httpServer = new JournalNodeHttpServer(conf, this);
+      httpServer.start();
+
+      httpServerURI = httpServer.getServerURI().toString();
+
+      rpcServer = new JournalNodeRpcServer(conf, this);
+      rpcServer.start();
+    } catch (IOException ioe) {
+      //Shutdown JournalNode of JournalNodeRpcServer fails to start
+      LOG.error("Failed to start JournalNode.", ioe);
+      this.stop(1);
+      throw ioe;
+    }
   }
 
   public boolean isStarted() {
@@ -190,7 +216,11 @@ public class JournalNode implements Tool, Configurable, JournalNodeMXBean {
    */
   public void stop(int rc) {
     this.resultCode = rc;
-    
+
+    for (JournalNodeSyncer jSyncer : journalSyncersById.values()) {
+      jSyncer.stopSync();
+    }
+
     if (rpcServer != null) { 
       rpcServer.stop();
     }
@@ -278,14 +308,18 @@ public class JournalNode implements Tool, Configurable, JournalNodeMXBean {
         return file.isDirectory();
       }
     });
-    for (File journalDir : journalDirs) {
-      String jid = journalDir.getName();
-      if (!status.containsKey(jid)) {
-        Map<String, String> jMap = new HashMap<String, String>();
-        jMap.put("Formatted", "true");
-        status.put(jid, jMap);
+
+    if (journalDirs != null) {
+      for (File journalDir : journalDirs) {
+        String jid = journalDir.getName();
+        if (!status.containsKey(jid)) {
+          Map<String, String> jMap = new HashMap<String, String>();
+          jMap.put("Formatted", "true");
+          status.put(jid, jMap);
+        }
       }
     }
+
     return JSON.toString(status);
   }
   
@@ -307,7 +341,12 @@ public class JournalNode implements Tool, Configurable, JournalNodeMXBean {
 
   public static void main(String[] args) throws Exception {
     StringUtils.startupShutdownMessage(JournalNode.class, args, LOG);
-    System.exit(ToolRunner.run(new JournalNode(), args));
+    try {
+      System.exit(ToolRunner.run(new JournalNode(), args));
+    } catch (Throwable e) {
+      LOG.error("Failed to start journalnode.", e);
+      terminate(-1, e);
+    }
   }
 
   public void doPreUpgrade(String journalId) throws IOException {

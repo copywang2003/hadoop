@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
 import java.util.Collection;
 import java.util.EnumSet;
+import java.util.List;
 
 import org.apache.commons.lang.StringEscapeUtils;
 import org.apache.commons.lang.math.LongRange;
@@ -44,9 +45,9 @@ import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.server.webapp.dao.AppInfo;
 import org.apache.hadoop.yarn.webapp.BadRequestException;
-import org.apache.hadoop.yarn.webapp.hamlet.Hamlet;
-import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TABLE;
-import org.apache.hadoop.yarn.webapp.hamlet.Hamlet.TBODY;
+import org.apache.hadoop.yarn.webapp.hamlet2.Hamlet;
+import org.apache.hadoop.yarn.webapp.hamlet2.Hamlet.TABLE;
+import org.apache.hadoop.yarn.webapp.hamlet2.Hamlet.TBODY;
 import org.apache.hadoop.yarn.webapp.view.HtmlBlock;
 
 import com.google.inject.Inject;
@@ -110,18 +111,22 @@ public class AppsBlock extends HtmlBlock {
         new LongRange(appStartedTimeBegain, appStartedTimeEnd));
 
     if (callerUGI == null) {
-      appReports = appBaseProt.getApplications(request).getApplicationList();
+      appReports = getApplicationReport(request);
     } else {
       appReports =
           callerUGI
             .doAs(new PrivilegedExceptionAction<Collection<ApplicationReport>>() {
               @Override
               public Collection<ApplicationReport> run() throws Exception {
-                return appBaseProt.getApplications(request)
-                  .getApplicationList();
+                return getApplicationReport(request);
               }
             });
     }
+  }
+
+  protected List<ApplicationReport> getApplicationReport(
+      final GetApplicationsRequest request) throws YarnException, IOException {
+    return appBaseProt.getApplications(request).getApplicationList();
   }
 
   @Override
@@ -134,7 +139,7 @@ public class AppsBlock extends HtmlBlock {
     catch( Exception e) {
       String message = "Failed to read the applications.";
       LOG.error(message, e);
-      html.p()._(message)._();
+      html.p().__(message).__();
       return;
     }
     renderData(html);
@@ -147,7 +152,7 @@ public class AppsBlock extends HtmlBlock {
           .th(".queue", "Queue").th(".priority", "Application Priority")
           .th(".starttime", "StartTime").th(".finishtime", "FinishTime")
           .th(".state", "State").th(".finalstatus", "FinalStatus")
-          .th(".progress", "Progress").th(".ui", "Tracking UI")._()._().tbody();
+          .th(".progress", "Progress").th(".ui", "Tracking UI").__().__().tbody();
 
     StringBuilder appsTableData = new StringBuilder("[\n");
     for (ApplicationReport appReport : appReports) {
@@ -218,8 +223,8 @@ public class AppsBlock extends HtmlBlock {
     }
     appsTableData.append("]");
     html.script().$type("text/javascript")
-      ._("var appsTableData=" + appsTableData)._();
+      .__("var appsTableData=" + appsTableData).__();
 
-    tbody._()._();
+    tbody.__().__();
   }
 }

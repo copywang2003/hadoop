@@ -20,18 +20,31 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.retry.RetryPolicies;
+import org.apache.hadoop.io.retry.RetryPolicy;
+import org.apache.hadoop.ipc.TestRpcBase.TestTokenIdentifier;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
 import org.apache.hadoop.security.SaslRpcServer.AuthMethod;
 import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod;
 import org.apache.hadoop.security.authentication.util.KerberosName;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.StringUtils;
-import org.junit.*;
+import org.apache.hadoop.util.Time;
+import org.junit.After;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.BeforeClass;
+import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
 
 import javax.security.auth.Subject;
 import javax.security.auth.kerberos.KerberosPrincipal;
+import javax.security.auth.kerberos.KeyTab;
 import javax.security.auth.login.AppConfigurationEntry;
 import javax.security.auth.login.LoginContext;
 
@@ -43,18 +56,38 @@ import java.lang.reflect.Method;
 import java.security.PrivilegedExceptionAction;
 import java.util.Collection;
 import java.util.ConcurrentModificationException;
+import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeys.HADOOP_TREAT_SUBJECT_EXTERNAL_KEY;
 import static org.apache.hadoop.fs.CommonConfigurationKeys.HADOOP_USER_GROUP_METRICS_PERCENTILES_INTERVALS;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTH_TO_LOCAL;
-import static org.apache.hadoop.ipc.TestSaslRPC.*;
-import static org.apache.hadoop.test.MetricsAsserts.*;
-import static org.junit.Assert.*;
+import static org.apache.hadoop.test.MetricsAsserts.assertCounter;
+import static org.apache.hadoop.test.MetricsAsserts.assertCounterGt;
+import static org.apache.hadoop.test.MetricsAsserts.assertGaugeGt;
+import static org.apache.hadoop.test.MetricsAsserts.assertQuantileGauges;
+import static org.apache.hadoop.test.MetricsAsserts.getDoubleGauge;
+import static org.apache.hadoop.test.MetricsAsserts.getMetrics;
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 public class TestUserGroupInformation {
+
+  static final Logger LOG = LoggerFactory.getLogger(
+      TestUserGroupInformation.class);
   final private static String USER_NAME = "user1@HADOOP.APACHE.ORG";
   final private static String GROUP1_NAME = "group1";
   final private static String GROUP2_NAME = "group2";
@@ -107,7 +140,7 @@ public class TestUserGroupInformation {
     UserGroupInformation.setLoginUser(null);
   }
 
-  @Test (timeout = 30000)
+  @Test(timeout = 30000)
   public void testSimpleLogin() throws IOException {
     tryLoginAuthenticationMethod(AuthenticationMethod.SIMPLE, true);
   }
@@ -443,8 +476,10 @@ public class TestUserGroupInformation {
     UserGroupInformation uugi = 
       UserGroupInformation.createUserForTesting(USER_NAME, GROUP_NAMES);
     assertEquals(USER_NAME, uugi.getUserName());
-    assertArrayEquals(new String[]{GROUP1_NAME, GROUP2_NAME, GROUP3_NAME},
-                      uugi.getGroupNames());
+    String[] expected = new String[]{GROUP1_NAME, GROUP2_NAME, GROUP3_NAME};
+    assertArrayEquals(expected, uugi.getGroupNames());
+    assertArrayEquals(expected, uugi.getGroups().toArray(new String[0]));
+    assertEquals(GROUP1_NAME, uugi.getPrimaryGroupName());
   }
 
   @SuppressWarnings("unchecked") // from Mockito mocks
@@ -843,7 +878,7 @@ public class TestUserGroupInformation {
     method.setAccessible(false);
   }
   
-  @Test(timeout=1000)
+  @Test(timeout=10000)
   public void testSetLoginUser() throws IOException {
     UserGroupInformation ugi = UserGroupInformation.createRemoteUser("test-user");
     UserGroupInformation.setLoginUser(ugi);
@@ -869,8 +904,10 @@ public class TestUserGroupInformation {
     ugi.addToken(new Text("regular-token"), token);
 
     // Now add cloned private token
-    ugi.addToken(new Text("private-token"), new Token.PrivateToken<TestTokenIdentifier>(token));
-    ugi.addToken(new Text("private-token1"), new Token.PrivateToken<TestTokenIdentifier>(token));
+    Text service = new Text("private-token");
+    ugi.addToken(service, token.privateClone(service));
+    Text service1 = new Text("private-token1");
+    ugi.addToken(service1, token.privateClone(service1));
 
     // Ensure only non-private tokens are returned
     Collection<Token<? extends TokenIdentifier>> tokens = ugi.getCredentials().getAllTokens();
@@ -982,5 +1019,119 @@ public class TestUserGroupInformation {
     Collection<Token<?>> credsugiTokens = tokenUgi.getTokens();
     assertTrue(credsugiTokens.contains(token1));
     assertTrue(credsugiTokens.contains(token2));
+  }
+
+  private void testCheckTGTAfterLoginFromSubjectHelper() throws Exception {
+    // security on, default is remove default realm
+    SecurityUtil.setAuthenticationMethod(AuthenticationMethod.KERBEROS, conf);
+    UserGroupInformation.setConfiguration(conf);
+
+    // Login from a pre-set subject with a keytab
+    final Subject subject = new Subject();
+    KeyTab keytab = KeyTab.getInstance();
+    subject.getPrivateCredentials().add(keytab);
+    UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
+
+    ugi.doAs(new PrivilegedExceptionAction<Void>() {
+      @Override
+      public Void run() throws IOException {
+        UserGroupInformation.loginUserFromSubject(subject);
+        // this should not throw.
+        UserGroupInformation.getLoginUser().checkTGTAndReloginFromKeytab();
+        return null;
+      }
+    });
+  }
+
+  @Test(expected = KerberosAuthException.class)
+  public void testCheckTGTAfterLoginFromSubject() throws Exception {
+    testCheckTGTAfterLoginFromSubjectHelper();
+  }
+
+  @Test
+  public void testCheckTGTAfterLoginFromSubjectFix() throws Exception {
+    conf.setBoolean(HADOOP_TREAT_SUBJECT_EXTERNAL_KEY, true);
+    testCheckTGTAfterLoginFromSubjectHelper();
+  }
+
+  @Test
+  public void testGetNextRetryTime() throws Exception {
+    GenericTestUtils.setLogLevel(UserGroupInformation.LOG, Level.DEBUG);
+    final long reloginInterval = 1;
+    final long reloginIntervalMs = reloginInterval * 1000;
+    // Relogin happens every 1 second.
+    conf.setLong(HADOOP_KERBEROS_MIN_SECONDS_BEFORE_RELOGIN, reloginInterval);
+    SecurityUtil.setAuthenticationMethod(AuthenticationMethod.KERBEROS, conf);
+    UserGroupInformation.setConfiguration(conf);
+
+    // Suppose tgt start time is now, end time is 20 seconds from now.
+    final long now = Time.now();
+    final Date endDate = new Date(now + 20000);
+
+    // Explicitly test the exponential back-off logic.
+    // Suppose some time (10 seconds) passed.
+    // Verify exponential backoff and max=(login interval before endTime).
+    final long currentTime = now + 10000;
+    final long endTime = endDate.getTime();
+
+    assertEquals(0, UserGroupInformation.metrics.getRenewalFailures().value());
+    RetryPolicy rp = RetryPolicies.exponentialBackoffRetry(Long.SIZE - 2,
+        1000, TimeUnit.MILLISECONDS);
+    long lastRetry =
+        UserGroupInformation.getNextTgtRenewalTime(endTime, currentTime, rp);
+    assertWithinBounds(
+        UserGroupInformation.metrics.getRenewalFailures().value(),
+        lastRetry, reloginIntervalMs, currentTime);
+
+    UserGroupInformation.metrics.getRenewalFailures().incr();
+    lastRetry =
+        UserGroupInformation.getNextTgtRenewalTime(endTime, currentTime, rp);
+    assertWithinBounds(
+        UserGroupInformation.metrics.getRenewalFailures().value(),
+        lastRetry, reloginIntervalMs, currentTime);
+
+    UserGroupInformation.metrics.getRenewalFailures().incr();
+    lastRetry =
+        UserGroupInformation.getNextTgtRenewalTime(endTime, currentTime, rp);
+    assertWithinBounds(
+        UserGroupInformation.metrics.getRenewalFailures().value(),
+        lastRetry, reloginIntervalMs, currentTime);
+
+    UserGroupInformation.metrics.getRenewalFailures().incr();
+    lastRetry =
+        UserGroupInformation.getNextTgtRenewalTime(endTime, currentTime, rp);
+    assertWithinBounds(
+        UserGroupInformation.metrics.getRenewalFailures().value(),
+        lastRetry, reloginIntervalMs, currentTime);
+
+    // last try should be right before expiry.
+    UserGroupInformation.metrics.getRenewalFailures().incr();
+    lastRetry =
+        UserGroupInformation.getNextTgtRenewalTime(endTime, currentTime, rp);
+    String str =
+        "5th retry, now:" + currentTime + ", retry:" + lastRetry;
+    LOG.info(str);
+    assertEquals(str, endTime - reloginIntervalMs, lastRetry);
+
+    // make sure no more retries after (tgt endTime - login interval).
+    UserGroupInformation.metrics.getRenewalFailures().incr();
+    lastRetry =
+        UserGroupInformation.getNextTgtRenewalTime(endTime, currentTime, rp);
+    str = "overflow retry, now:" + currentTime + ", retry:" + lastRetry;
+    LOG.info(str);
+    assertEquals(str, endTime - reloginIntervalMs, lastRetry);
+  }
+
+  private void assertWithinBounds(final int numFailures, final long lastRetry,
+      final long reloginIntervalMs, long now) {
+    // shift is 2 to the power of (numFailure).
+    int shift = numFailures + 1;
+    final long lower = now + reloginIntervalMs * (long)((1 << shift) * 0.5);
+    final long upper = now + reloginIntervalMs * (long)((1 << shift) * 1.5);
+    final String str = new String("Retry#" + (numFailures + 1) + ", now:" + now
+        + ", lower bound:" + lower + ", upper bound:" + upper
+        + ", retry:" + lastRetry);
+    LOG.info(str);
+    assertTrue(str, lower <= lastRetry && lastRetry < upper);
   }
 }

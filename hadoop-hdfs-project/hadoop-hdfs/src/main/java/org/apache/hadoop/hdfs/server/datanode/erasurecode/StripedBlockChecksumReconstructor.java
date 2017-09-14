@@ -57,6 +57,7 @@ public class StripedBlockChecksumReconstructor extends StripedReconstructor {
   }
 
   private void init() throws IOException {
+    initDecoderIfNecessary();
     getStripedReader().init();
     // allocate buffer to keep the reconstructed block data
     targetBuffer = allocateBuffer(getBufferSize());
@@ -74,29 +75,33 @@ public class StripedBlockChecksumReconstructor extends StripedReconstructor {
   public void reconstruct() throws IOException {
     MessageDigest digester = MD5Hash.getDigester();
     long maxTargetLength = getMaxTargetLength();
-    while (requestedLen > 0 && getPositionInBlock() < maxTargetLength) {
-      long remaining = maxTargetLength - getPositionInBlock();
-      final int toReconstructLen = (int) Math
-          .min(getStripedReader().getBufferSize(), remaining);
-      // step1: read from minimum source DNs required for reconstruction.
-      // The returned success list is the source DNs we do real read from
-      getStripedReader().readMinimumSources(toReconstructLen);
+    try {
+      while (requestedLen > 0 && getPositionInBlock() < maxTargetLength) {
+        long remaining = maxTargetLength - getPositionInBlock();
+        final int toReconstructLen = (int) Math
+            .min(getStripedReader().getBufferSize(), remaining);
+        // step1: read from minimum source DNs required for reconstruction.
+        // The returned success list is the source DNs we do real read from
+        getStripedReader().readMinimumSources(toReconstructLen);
 
-      // step2: decode to reconstruct targets
-      reconstructTargets(toReconstructLen);
+        // step2: decode to reconstruct targets
+        reconstructTargets(toReconstructLen);
 
-      // step3: calculate checksum
-      checksumDataLen += checksumWithTargetOutput(targetBuffer.array(),
-          toReconstructLen, digester);
+        // step3: calculate checksum
+        checksumDataLen += checksumWithTargetOutput(targetBuffer.array(),
+            toReconstructLen, digester);
 
-      updatePositionInBlock(toReconstructLen);
-      requestedLen -= toReconstructLen;
-      clearBuffers();
+        updatePositionInBlock(toReconstructLen);
+        requestedLen -= toReconstructLen;
+        clearBuffers();
+      }
+
+      byte[] digest = digester.digest();
+      md5 = new MD5Hash(digest);
+      md5.write(checksumWriter);
+    } finally {
+      cleanup();
     }
-
-    byte[] digest = digester.digest();
-    md5 = new MD5Hash(digest);
-    md5.write(checksumWriter);
   }
 
   private long checksumWithTargetOutput(byte[] outputData, int toReconstructLen,
@@ -131,6 +136,7 @@ public class StripedBlockChecksumReconstructor extends StripedReconstructor {
       // case-2) length of data bytes which is less than bytesPerCRC
       if (partialLength > 0) {
         byte[] partialCrc = new byte[getChecksum().getChecksumSize()];
+        getChecksum().reset();
         getChecksum().update(outputData, dataOffset, partialLength);
         getChecksum().writeValue(partialCrc, 0, true);
         digester.update(partialCrc);
@@ -150,8 +156,6 @@ public class StripedBlockChecksumReconstructor extends StripedReconstructor {
   }
 
   private void reconstructTargets(int toReconstructLen) {
-    initDecoderIfNecessary();
-
     ByteBuffer[] inputs = getStripedReader().getInputBuffers(toReconstructLen);
 
     ByteBuffer[] outputs = new ByteBuffer[1];

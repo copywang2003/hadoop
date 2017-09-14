@@ -93,9 +93,7 @@ public class ContainerPBImpl extends Container {
             builder.getNodeId())) {
       builder.setNodeId(convertToProtoFormat(this.nodeId));
     }
-    if (this.resource != null
-        && !((ResourcePBImpl) this.resource).getProto().equals(
-            builder.getResource())) {
+    if (this.resource != null) {
       builder.setResource(convertToProtoFormat(this.resource));
     }
     if (this.priority != null && 
@@ -274,6 +272,18 @@ public class ContainerPBImpl extends Container {
     builder.setAllocationRequestId(allocationRequestID);
   }
 
+  @Override
+  public int getVersion() {
+    ContainerProtoOrBuilder p = viaProto ? proto : builder;
+    return p.getVersion();
+  }
+
+  @Override
+  public void setVersion(int version) {
+    maybeInitBuilder();
+    builder.setVersion(version);
+  }
+
   private ContainerIdPBImpl convertFromProtoFormat(ContainerIdProto p) {
     return new ContainerIdPBImpl(p);
   }
@@ -295,7 +305,7 @@ public class ContainerPBImpl extends Container {
   }
 
   private ResourceProto convertToProtoFormat(Resource t) {
-    return ((ResourcePBImpl)t).getProto();
+    return ProtoUtils.convertToProtoFormat(t);
   }
 
   private PriorityPBImpl convertFromProtoFormat(PriorityProto p) {
@@ -329,6 +339,7 @@ public class ContainerPBImpl extends Container {
     sb.append("ContainerId: ").append(getId()).append(", ");
     sb.append("AllocationRequestId: ").append(getAllocationRequestId())
         .append(", ");
+    sb.append("Version: ").append(getVersion()).append(", ");
     sb.append("NodeId: ").append(getNodeId()).append(", ");
     sb.append("NodeHttpAddress: ").append(getNodeHttpAddress()).append(", ");
     sb.append("Resource: ").append(getResource()).append(", ");

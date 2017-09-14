@@ -16,17 +16,16 @@
  */
 package org.apache.hadoop.yarn.server.timeline;
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntityGroupId;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.server.timeline.security.TimelineACLsManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Cache item for timeline server v1.5 reader cache. Each cache item has a
@@ -41,8 +40,6 @@ public class EntityCacheItem {
   private EntityGroupFSTimelineStore.AppLogs appLogs;
   private long lastRefresh;
   private Configuration config;
-  private int refCount = 0;
-  private static AtomicInteger activeStores = new AtomicInteger(0);
 
   public EntityCacheItem(TimelineEntityGroupId gId, Configuration config) {
     this.groupId = gId;
@@ -76,13 +73,6 @@ public class EntityCacheItem {
   }
 
   /**
-   * @return The number of currently active stores in all CacheItems.
-   */
-  public static int getActiveStores() {
-    return activeStores.get();
-  }
-
-  /**
    * Refresh this cache item if it needs refresh. This will enforce an appLogs
    * rescan and then load new data. The refresh process is synchronized with
    * other operations on the same cache item.
@@ -107,9 +97,11 @@ public class EntityCacheItem {
       }
       if (!appLogs.getDetailLogs().isEmpty()) {
         if (store == null) {
-          activeStores.getAndIncrement();
-          store = new LevelDBCacheTimelineStore(groupId.toString(),
-              "LeveldbCache." + groupId);
+          store = ReflectionUtils.newInstance(config.getClass(
+              YarnConfiguration
+                  .TIMELINE_SERVICE_ENTITYGROUP_FS_STORE_CACHE_STORE,
+              MemoryTimelineStore.class, TimelineStore.class),
+              config);
           store.init(config);
           store.start();
         } else {
@@ -134,31 +126,6 @@ public class EntityCacheItem {
   }
 
   /**
-   * Increase the number of references to this cache item by 1.
-   */
-  public synchronized void incrRefs() {
-    refCount++;
-  }
-
-  /**
-   * Unregister a reader. Try to release the cache if the reader to current
-   * cache reaches 0.
-   *
-   * @return true if the cache has been released, otherwise false
-   */
-  public synchronized boolean tryRelease() {
-    refCount--;
-    // Only reclaim the storage if there is no reader.
-    if (refCount > 0) {
-      LOG.debug("{} references left for cached group {}, skipping the release",
-          refCount, groupId);
-      return false;
-    }
-    forceRelease();
-    return true;
-  }
-
-  /**
    * Force releasing the cache item for the given group id, even though there
    * may be active references.
    */
@@ -171,8 +138,6 @@ public class EntityCacheItem {
       LOG.warn("Error closing timeline store", e);
     }
     store = null;
-    activeStores.getAndDecrement();
-    refCount = 0;
     // reset offsets so next time logs are re-parsed
     for (LogInfo log : appLogs.getDetailLogs()) {
       if (log.getFilename().contains(groupId.toString())) {
@@ -180,12 +145,6 @@ public class EntityCacheItem {
       }
     }
     LOG.debug("Cache for group {} released. ", groupId);
-  }
-
-  @InterfaceAudience.Private
-  @VisibleForTesting
-  synchronized int getRefCount() {
-    return refCount;
   }
 
   private boolean needRefresh() {

@@ -99,8 +99,8 @@ public class TestFSEditLogLoader {
 
   private static final int NUM_DATA_NODES = 0;
 
-  private static final ErasureCodingPolicy testECPolicy
-      = StripedFileTestUtil.TEST_EC_POLICY;
+  private final ErasureCodingPolicy testECPolicy
+      = StripedFileTestUtil.getDefaultECPolicy();
 
   @Test
   public void testDisplayRecentEditLogOpCodes() throws IOException {
@@ -157,7 +157,7 @@ public class TestFSEditLogLoader {
     // start a cluster 
     Configuration conf = getConf();
     // Replicate and heartbeat fast to shave a few seconds off test
-    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1);
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY, 1);
     conf.setInt(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1);
 
     MiniDFSCluster cluster = null;
@@ -465,6 +465,7 @@ public class TestFSEditLogLoader {
       cluster.waitActive();
       DistributedFileSystem fs = cluster.getFileSystem();
       FSNamesystem fns = cluster.getNamesystem();
+      fs.enableErasureCodingPolicy(testECPolicy.getName());
 
       String testDir = "/ec";
       String testFile = "testfile_001";
@@ -474,13 +475,13 @@ public class TestFSEditLogLoader {
       long blkId = 1;
       long blkNumBytes = 1024;
       long timestamp = 1426222918;
-      short blockNum = StripedFileTestUtil.NUM_DATA_BLOCKS;
-      short parityNum = StripedFileTestUtil.NUM_PARITY_BLOCKS;
+      short blockNum = (short) testECPolicy.getNumDataUnits();
+      short parityNum = (short) testECPolicy.getNumParityUnits();
 
       //set the storage policy of the directory
       fs.mkdir(new Path(testDir), new FsPermission("755"));
       fs.getClient().getNamenode().setErasureCodingPolicy(
-          testDir, testECPolicy);
+          testDir, testECPolicy.getName());
 
       // Create a file with striped block
       Path p = new Path(testFilePath);
@@ -538,6 +539,7 @@ public class TestFSEditLogLoader {
       cluster.waitActive();
       DistributedFileSystem fs = cluster.getFileSystem();
       FSNamesystem fns = cluster.getNamesystem();
+      fs.enableErasureCodingPolicy(testECPolicy.getName());
 
       String testDir = "/ec";
       String testFile = "testfile_002";
@@ -547,13 +549,13 @@ public class TestFSEditLogLoader {
       long blkId = 1;
       long blkNumBytes = 1024;
       long timestamp = 1426222918;
-      short blockNum = StripedFileTestUtil.NUM_DATA_BLOCKS;
-      short parityNum = StripedFileTestUtil.NUM_PARITY_BLOCKS;
+      short blockNum = (short) testECPolicy.getNumDataUnits();
+      short parityNum = (short) testECPolicy.getNumParityUnits();
 
       //set the storage policy of the directory
       fs.mkdir(new Path(testDir), new FsPermission("755"));
       fs.getClient().getNamenode().setErasureCodingPolicy(
-          testDir, testECPolicy);
+          testDir, testECPolicy.getName());
 
       //create a file with striped blocks
       Path p = new Path(testFilePath);

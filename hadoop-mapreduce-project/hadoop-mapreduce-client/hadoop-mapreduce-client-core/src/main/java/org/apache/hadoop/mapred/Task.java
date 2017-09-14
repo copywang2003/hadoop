@@ -63,6 +63,7 @@ import org.apache.hadoop.mapreduce.MRConfig;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.lib.reduce.WrappedReducer;
 import org.apache.hadoop.mapreduce.task.ReduceContextImpl;
+import org.apache.hadoop.mapreduce.util.MRJobConfUtil;
 import org.apache.hadoop.yarn.util.ResourceCalculatorProcessTree;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.util.ExitUtil;
@@ -89,7 +90,7 @@ abstract public class Task implements Writable, Configurable {
    * @deprecated Provided for compatibility. Use {@link TaskCounter} instead.
    */
   @Deprecated
-  public static enum Counter { 
+  public enum Counter {
     MAP_INPUT_RECORDS, 
     MAP_OUTPUT_RECORDS,
     MAP_SKIPPED_RECORDS,
@@ -109,7 +110,11 @@ abstract public class Task implements Writable, Configurable {
     CPU_MILLISECONDS,
     PHYSICAL_MEMORY_BYTES,
     VIRTUAL_MEMORY_BYTES,
-    COMMITTED_HEAP_BYTES
+    COMMITTED_HEAP_BYTES,
+    MAP_PHYSICAL_MEMORY_BYTES_MAX,
+    MAP_VIRTUAL_MEMORY_BYTES_MAX,
+    REDUCE_PHYSICAL_MEMORY_BYTES_MAX,
+    REDUCE_VIRTUAL_MEMORY_BYTES_MAX
   }
 
   /**
@@ -781,9 +786,10 @@ abstract public class Task implements Writable, Configurable {
       int remainingRetries = MAX_RETRIES;
       // get current flag value and reset it as well
       boolean sendProgress = resetProgressFlag();
-      long taskProgressInterval =
-          conf.getLong(MRJobConfig.TASK_PROGRESS_REPORT_INTERVAL,
-                       MRJobConfig.DEFAULT_TASK_PROGRESS_REPORT_INTERVAL);
+
+      long taskProgressInterval = MRJobConfUtil.
+          getTaskProgressReportInterval(conf);
+
       while (!taskDone.get()) {
         synchronized (lock) {
           done = false;
@@ -881,7 +887,7 @@ abstract public class Task implements Writable, Configurable {
     }
     public void stopCommunicationThread() throws InterruptedException {
       if (pingThread != null) {
-        // Intent of the lock is to not send an interupt in the middle of an
+        // Intent of the lock is to not send an interrupt in the middle of an
         // umbilical.ping or umbilical.statusUpdate
         synchronized(lock) {
         //Interrupt if sleeping. Otherwise wait for the RPC call to return.
@@ -961,6 +967,24 @@ abstract public class Task implements Writable, Configurable {
 
     if (vMem != ResourceCalculatorProcessTree.UNAVAILABLE) {
       counters.findCounter(TaskCounter.VIRTUAL_MEMORY_BYTES).setValue(vMem);
+    }
+
+    if (pMem != ResourceCalculatorProcessTree.UNAVAILABLE) {
+      TaskCounter counter = isMapTask() ?
+          TaskCounter.MAP_PHYSICAL_MEMORY_BYTES_MAX :
+          TaskCounter.REDUCE_PHYSICAL_MEMORY_BYTES_MAX;
+      Counters.Counter pMemCounter =
+          counters.findCounter(counter);
+      pMemCounter.setValue(Math.max(pMemCounter.getValue(), pMem));
+    }
+
+    if (vMem != ResourceCalculatorProcessTree.UNAVAILABLE) {
+      TaskCounter counter = isMapTask() ?
+          TaskCounter.MAP_VIRTUAL_MEMORY_BYTES_MAX :
+          TaskCounter.REDUCE_VIRTUAL_MEMORY_BYTES_MAX;
+      Counters.Counter vMemCounter =
+          counters.findCounter(counter);
+      vMemCounter.setValue(Math.max(vMemCounter.getValue(), vMem));
     }
   }
 
@@ -1312,7 +1336,7 @@ abstract public class Task implements Writable, Configurable {
     setPhase(TaskStatus.Phase.CLEANUP);
     getProgress().setStatus("cleanup");
     statusUpdate(umbilical);
-    LOG.info("Runnning cleanup for the task");
+    LOG.info("Running cleanup for the task");
     // do the cleanup
     committer.abortTask(taskContext);
   }

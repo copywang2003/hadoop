@@ -17,7 +17,12 @@
 
 package org.apache.hadoop.hdfs.server.diskbalancer.datamodel;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.google.common.base.Preconditions;
+
 import org.apache.commons.io.FileUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,9 +30,7 @@ import org.apache.hadoop.hdfs.server.diskbalancer.connectors.ClusterConnector;
 import org.apache.hadoop.hdfs.server.diskbalancer.planner.NodePlan;
 import org.apache.hadoop.hdfs.server.diskbalancer.planner.Planner;
 import org.apache.hadoop.hdfs.server.diskbalancer.planner.PlannerFactory;
-import org.codehaus.jackson.annotate.JsonIgnore;
-import org.codehaus.jackson.annotate.JsonIgnoreProperties;
-import org.codehaus.jackson.map.ObjectMapper;
+import org.apache.hadoop.hdfs.web.JsonUtil;
 
 import java.io.File;
 import java.io.IOException;
@@ -69,6 +72,8 @@ public class DiskBalancerCluster {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(DiskBalancerCluster.class);
+  private static final ObjectReader READER =
+      new ObjectMapper().readerFor(DiskBalancerCluster.class);
   private final Set<String> exclusionList;
   private final Set<String> inclusionList;
   private ClusterConnector clusterConnector;
@@ -118,8 +123,7 @@ public class DiskBalancerCluster {
    * @throws IOException
    */
   public static DiskBalancerCluster parseJson(String json) throws IOException {
-    ObjectMapper mapper = new ObjectMapper();
-    return mapper.readValue(json, DiskBalancerCluster.class);
+    return READER.readValue(json);
   }
 
   /**
@@ -232,8 +236,7 @@ public class DiskBalancerCluster {
    * @throws IOException
    */
   public String toJson() throws IOException {
-    ObjectMapper mapper = new ObjectMapper();
-    return mapper.writeValueAsString(this);
+    return JsonUtil.toJsonString(this);
   }
 
   /**

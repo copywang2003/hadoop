@@ -31,31 +31,45 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.io.DataOutputBuffer;
+import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.service.Service;
 import org.apache.hadoop.yarn.MockApps;
+import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
+import org.apache.hadoop.yarn.api.records.ExecutionType;
+import org.apache.hadoop.yarn.api.records.ExecutionTypeRequest;
+import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceInformation;
+import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.EventHandler;
+import org.apache.hadoop.yarn.exceptions.InvalidResourceRequestException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.ahs.RMApplicationHistoryWriter;
 import org.apache.hadoop.yarn.server.resourcemanager.metrics.SystemMetricsPublisher;
+import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.placement.PlacementManager;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.MockRMApp;
@@ -66,13 +80,18 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AMLivelinessMonitor;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.security.ClientToAMTokenSecretManagerInRM;
+import org.apache.hadoop.yarn.server.resourcemanager.timelineservice.RMTimelineCollectorManager;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
+import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
+import static org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration.PREFIX;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -190,9 +209,11 @@ public class TestAppManager{
     public int getCompletedAppsListSize() {
       return super.getCompletedAppsListSize();
     }
+
     public int getCompletedAppsInStateStore() {
       return this.completedAppsInStateStore;
     }
+
     public void submitApplication(
         ApplicationSubmissionContext submissionContext, String user)
             throws YarnException, IOException {
@@ -223,9 +244,13 @@ public class TestAppManager{
     long now = System.currentTimeMillis();
 
     rmContext = mockRMContext(1, now - 10);
+    rmContext
+        .setRMTimelineCollectorManager(mock(RMTimelineCollectorManager.class));
     ResourceScheduler scheduler = mockResourceScheduler();
     ((RMContextImpl)rmContext).setScheduler(scheduler);
     Configuration conf = new Configuration();
+    conf.setBoolean(YarnConfiguration.NODE_LABELS_ENABLED, true);
+    ((RMContextImpl) rmContext).setYarnConfiguration(conf);
     ApplicationMasterService masterService =
         new ApplicationMasterService(rmContext, scheduler);
     appMonitor = new TestRMAppManager(rmContext,
@@ -239,6 +264,7 @@ public class TestAppManager{
     asContext.setApplicationId(appId);
     asContext.setAMContainerSpec(mockContainerLaunchContext(recordFactory));
     asContext.setResource(mockResource());
+    asContext.setPriority(Priority.newInstance(0));
     setupDispatcher(rmContext, conf);
   }
 
@@ -246,6 +272,7 @@ public class TestAppManager{
   public void tearDown() {
     setAppEventType(RMAppEventType.KILL);
     ((Service)rmContext.getDispatcher()).stop();
+    UserGroupInformation.reset();
   }
 
   @Test
@@ -273,6 +300,44 @@ public class TestAppManager{
         appMonitor.getCompletedAppsListSize());
     verify(rmContext.getStateStore(), never()).removeApplication(
       isA(RMApp.class));
+  }
+
+  @Test
+  public void testQueueSubmitWithNoPermission() throws IOException {
+    YarnConfiguration conf = new YarnConfiguration();
+    conf.set(YarnConfiguration.RM_SCHEDULER,
+        CapacityScheduler.class.getCanonicalName());
+    conf.set(PREFIX + "root.acl_submit_applications", " ");
+    conf.set(PREFIX + "root.acl_administer_queue", " ");
+
+    conf.set(PREFIX + "root.default.acl_submit_applications", " ");
+    conf.set(PREFIX + "root.default.acl_administer_queue", " ");
+    conf.set(YarnConfiguration.YARN_ACL_ENABLE, "true");
+    MockRM mockRM = new MockRM(conf);
+    ClientRMService rmService = mockRM.getClientRMService();
+    SubmitApplicationRequest req =
+        Records.newRecord(SubmitApplicationRequest.class);
+    ApplicationSubmissionContext sub =
+        Records.newRecord(ApplicationSubmissionContext.class);
+    sub.setApplicationId(appId);
+    ResourceRequest resReg =
+        ResourceRequest.newInstance(Priority.newInstance(0),
+            ResourceRequest.ANY, Resource.newInstance(1024, 1), 1);
+    sub.setAMContainerResourceRequests(Collections.singletonList(resReg));
+    req.setApplicationSubmissionContext(sub);
+    sub.setAMContainerSpec(mock(ContainerLaunchContext.class));
+    try {
+      rmService.submitApplication(req);
+    } catch (Exception e) {
+      e.printStackTrace();
+      if (e instanceof YarnException) {
+        Assert.assertTrue(e.getCause() instanceof AccessControlException);
+      } else {
+        Assert.fail("Yarn exception is expected : " + e.getMessage());
+      }
+    } finally {
+      mockRM.close();
+    }
   }
 
   @Test
@@ -468,8 +533,157 @@ public class TestAppManager{
     Assert.assertEquals("app event type is wrong before", RMAppEventType.KILL, appEventType);
   }
 
+  @SuppressWarnings("deprecation")
   @Test
-  public void testRMAppSubmit() throws Exception {
+  public void testRMAppSubmitAMContainerResourceRequests() throws Exception {
+    asContext.setResource(Resources.createResource(1024));
+    asContext.setAMContainerResourceRequest(
+        ResourceRequest.newInstance(Priority.newInstance(0),
+            ResourceRequest.ANY, Resources.createResource(1024), 1, true));
+    List<ResourceRequest> reqs = new ArrayList<>();
+    reqs.add(ResourceRequest.newInstance(Priority.newInstance(0),
+        ResourceRequest.ANY, Resources.createResource(1025), 1, false));
+    reqs.add(ResourceRequest.newInstance(Priority.newInstance(0),
+        "/rack", Resources.createResource(1025), 1, false));
+    reqs.add(ResourceRequest.newInstance(Priority.newInstance(0),
+        "/rack/node", Resources.createResource(1025), 1, true));
+    asContext.setAMContainerResourceRequests(cloneResourceRequests(reqs));
+    // getAMContainerResourceRequest uses the first entry of
+    // getAMContainerResourceRequests
+    Assert.assertEquals(reqs.get(0), asContext.getAMContainerResourceRequest());
+    Assert.assertEquals(reqs, asContext.getAMContainerResourceRequests());
+    RMApp app = testRMAppSubmit();
+    for (ResourceRequest req : reqs) {
+      req.setNodeLabelExpression(RMNodeLabelsManager.NO_LABEL);
+    }
+    // setAMContainerResourceRequests has priority over
+    // setAMContainerResourceRequest and setResource
+    Assert.assertEquals(reqs, app.getAMResourceRequests());
+  }
+
+  @SuppressWarnings("deprecation")
+  @Test
+  public void testRMAppSubmitAMContainerResourceRequest() throws Exception {
+    asContext.setResource(Resources.createResource(1024));
+    asContext.setAMContainerResourceRequests(null);
+    ResourceRequest req =
+        ResourceRequest.newInstance(Priority.newInstance(0),
+            ResourceRequest.ANY, Resources.createResource(1025), 1, true);
+    asContext.setAMContainerResourceRequest(cloneResourceRequest(req));
+    // getAMContainerResourceRequests uses a singleton list of
+    // getAMContainerResourceRequest
+    Assert.assertEquals(req, asContext.getAMContainerResourceRequest());
+    Assert.assertEquals(req, asContext.getAMContainerResourceRequests().get(0));
+    Assert.assertEquals(1, asContext.getAMContainerResourceRequests().size());
+    RMApp app = testRMAppSubmit();
+    req.setNodeLabelExpression(RMNodeLabelsManager.NO_LABEL);
+    // setAMContainerResourceRequest has priority over setResource
+    Assert.assertEquals(Collections.singletonList(req),
+        app.getAMResourceRequests());
+  }
+
+  @Test
+  public void testRMAppSubmitResource() throws Exception {
+    asContext.setResource(Resources.createResource(1024));
+    asContext.setAMContainerResourceRequests(null);
+    RMApp app = testRMAppSubmit();
+    // setResource
+    Assert.assertEquals(Collections.singletonList(
+        ResourceRequest.newInstance(RMAppAttemptImpl.AM_CONTAINER_PRIORITY,
+        ResourceRequest.ANY, Resources.createResource(1024), 1, true, "")),
+        app.getAMResourceRequests());
+  }
+
+  @Test
+  public void testRMAppSubmitNoResourceRequests() throws Exception {
+    asContext.setResource(null);
+    asContext.setAMContainerResourceRequests(null);
+    try {
+      testRMAppSubmit();
+      Assert.fail("Should have failed due to no ResourceRequest");
+    } catch (InvalidResourceRequestException e) {
+      Assert.assertEquals(
+          "Invalid resource request, no resources requested",
+          e.getMessage());
+    }
+  }
+
+  @Test
+  public void testRMAppSubmitAMContainerResourceRequestsDisagree()
+      throws Exception {
+    asContext.setResource(null);
+    List<ResourceRequest> reqs = new ArrayList<>();
+    ResourceRequest anyReq = ResourceRequest.newInstance(
+        Priority.newInstance(1),
+        ResourceRequest.ANY, Resources.createResource(1024), 1, false, "label1",
+        ExecutionTypeRequest.newInstance(ExecutionType.GUARANTEED));
+    reqs.add(anyReq);
+    reqs.add(ResourceRequest.newInstance(Priority.newInstance(2),
+        "/rack", Resources.createResource(1025), 2, false, "",
+        ExecutionTypeRequest.newInstance(ExecutionType.OPPORTUNISTIC)));
+    reqs.add(ResourceRequest.newInstance(Priority.newInstance(3),
+        "/rack/node", Resources.createResource(1026), 3, true, "",
+        ExecutionTypeRequest.newInstance(ExecutionType.OPPORTUNISTIC)));
+    asContext.setAMContainerResourceRequests(cloneResourceRequests(reqs));
+    RMApp app = testRMAppSubmit();
+    // It should force the requests to all agree on these points
+    for (ResourceRequest req : reqs) {
+      req.setCapability(anyReq.getCapability());
+      req.setExecutionTypeRequest(
+          ExecutionTypeRequest.newInstance(ExecutionType.GUARANTEED));
+      req.setNumContainers(1);
+      req.setPriority(Priority.newInstance(0));
+    }
+    Assert.assertEquals(reqs, app.getAMResourceRequests());
+  }
+
+  @Test
+  public void testRMAppSubmitAMContainerResourceRequestsNoAny()
+      throws Exception {
+    asContext.setResource(null);
+    List<ResourceRequest> reqs = new ArrayList<>();
+    reqs.add(ResourceRequest.newInstance(Priority.newInstance(1),
+        "/rack", Resources.createResource(1025), 1, false));
+    reqs.add(ResourceRequest.newInstance(Priority.newInstance(1),
+        "/rack/node", Resources.createResource(1025), 1, true));
+    asContext.setAMContainerResourceRequests(cloneResourceRequests(reqs));
+    // getAMContainerResourceRequest uses the first entry of
+    // getAMContainerResourceRequests
+    Assert.assertEquals(reqs, asContext.getAMContainerResourceRequests());
+    try {
+      testRMAppSubmit();
+      Assert.fail("Should have failed due to missing ANY ResourceRequest");
+    } catch (InvalidResourceRequestException e) {
+      Assert.assertEquals(
+          "Invalid resource request, no resource request specified with *",
+          e.getMessage());
+    }
+  }
+
+  @Test
+  public void testRMAppSubmitAMContainerResourceRequestsTwoManyAny()
+      throws Exception {
+    asContext.setResource(null);
+    List<ResourceRequest> reqs = new ArrayList<>();
+    reqs.add(ResourceRequest.newInstance(Priority.newInstance(1),
+        ResourceRequest.ANY, Resources.createResource(1025), 1, false));
+    reqs.add(ResourceRequest.newInstance(Priority.newInstance(1),
+        ResourceRequest.ANY, Resources.createResource(1025), 1, false));
+    asContext.setAMContainerResourceRequests(cloneResourceRequests(reqs));
+    // getAMContainerResourceRequest uses the first entry of
+    // getAMContainerResourceRequests
+    Assert.assertEquals(reqs, asContext.getAMContainerResourceRequests());
+    try {
+      testRMAppSubmit();
+      Assert.fail("Should have failed due to too many ANY ResourceRequests");
+    } catch (InvalidResourceRequestException e) {
+      Assert.assertEquals(
+          "Invalid resource request, only one resource request with * is " +
+              "allowed", e.getMessage());
+    }
+  }
+
+  private RMApp testRMAppSubmit() throws Exception {
     appMonitor.submitApplication(asContext, "test");
     RMApp app = rmContext.getRMApps().get(appId);
     Assert.assertNotNull("app is null", app);
@@ -480,12 +694,14 @@ public class TestAppManager{
 
     // wait for event to be processed
     int timeoutSecs = 0;
-    while ((getAppEventType() == RMAppEventType.KILL) && 
+    while ((getAppEventType() == RMAppEventType.KILL) &&
         timeoutSecs++ < 20) {
       Thread.sleep(1000);
     }
     Assert.assertEquals("app event type sent is wrong", RMAppEventType.START,
         getAppEventType());
+
+    return app;
   }
 
   @Test
@@ -494,6 +710,10 @@ public class TestAppManager{
     DataOutputBuffer dob = new DataOutputBuffer();
     ByteBuffer securityTokens = ByteBuffer.wrap(dob.getData(), 0,
         dob.getLength());
+    Configuration conf = new Configuration();
+    conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHENTICATION,
+        "kerberos");
+    UserGroupInformation.setConfiguration(conf);
     asContext.getAMContainerSpec().setTokens(securityTokens);
     try {
       appMonitor.submitApplication(asContext, "test");
@@ -512,36 +732,6 @@ public class TestAppManager{
     }
     Assert.assertEquals("app event type sent is wrong",
         RMAppEventType.APP_REJECTED, getAppEventType());
-    asContext.getAMContainerSpec().setTokens(null);
-  }
-
-  @Test
-  public void testRMAppSubmitWithValidTokens() throws Exception {
-    // Setup valid security tokens
-    DataOutputBuffer dob = new DataOutputBuffer();
-    Credentials credentials = new Credentials();
-    credentials.writeTokenStorageToStream(dob);
-    ByteBuffer securityTokens = ByteBuffer.wrap(dob.getData(), 0,
-        dob.getLength());
-    asContext.getAMContainerSpec().setTokens(securityTokens);
-    appMonitor.submitApplication(asContext, "test");
-    RMApp app = rmContext.getRMApps().get(appId);
-    Assert.assertNotNull("app is null", app);
-    Assert.assertEquals("app id doesn't match", appId,
-        app.getApplicationId());
-    Assert.assertEquals("app state doesn't match", RMAppState.NEW,
-        app.getState());
-    verify(metricsPublisher).appACLsUpdated(
-        any(RMApp.class), any(String.class), anyLong());
-
-    // wait for event to be processed
-    int timeoutSecs = 0;
-    while ((getAppEventType() == RMAppEventType.KILL) &&
-        timeoutSecs++ < 20) {
-      Thread.sleep(1000);
-    }
-    Assert.assertEquals("app event type sent is wrong", RMAppEventType.START,
-        getAppEventType());
     asContext.getAMContainerSpec().setTokens(null);
   }
 
@@ -640,8 +830,13 @@ public class TestAppManager{
     when(app.getQueue()).thenReturn("Multiline\n\n\r\rQueueName");
     when(app.getState()).thenReturn(RMAppState.RUNNING);
     when(app.getApplicationType()).thenReturn("MAPREDUCE");
+    when(app.getSubmitTime()).thenReturn(1000L);
+    Map<String, Long> resourceSecondsMap = new HashMap<>();
+    resourceSecondsMap.put(ResourceInformation.MEMORY_MB.getName(), 16384L);
+    resourceSecondsMap.put(ResourceInformation.VCORES.getName(), 64L);
     RMAppMetrics metrics =
-        new RMAppMetrics(Resource.newInstance(1234, 56), 10, 1, 16384, 64);
+        new RMAppMetrics(Resource.newInstance(1234, 56),
+            10, 1, resourceSecondsMap, new HashMap<>());
     when(app.getRMAppMetrics()).thenReturn(metrics);
 
     RMAppManager.ApplicationSummary.SummaryBuilder summary =
@@ -655,6 +850,7 @@ public class TestAppManager{
     Assert.assertTrue(msg.contains("Multiline" + escaped +"AppName"));
     Assert.assertTrue(msg.contains("Multiline" + escaped +"UserName"));
     Assert.assertTrue(msg.contains("Multiline" + escaped +"QueueName"));
+    Assert.assertTrue(msg.contains("submitTime=1000"));
     Assert.assertTrue(msg.contains("memorySeconds=16384"));
     Assert.assertTrue(msg.contains("vcoreSeconds=64"));
     Assert.assertTrue(msg.contains("preemptedAMContainers=1"));
@@ -708,6 +904,15 @@ public class TestAppManager{
     ResourceCalculator rs = mock(ResourceCalculator.class);
     when(scheduler.getResourceCalculator()).thenReturn(rs);
 
+    when(scheduler.getNormalizedResource(any()))
+        .thenAnswer(new Answer<Resource>() {
+      @Override
+      public Resource answer(InvocationOnMock invocationOnMock)
+          throws Throwable {
+        return (Resource) invocationOnMock.getArguments()[0];
+      }
+    });
+
     return scheduler;
   }
 
@@ -724,4 +929,26 @@ public class TestAppManager{
         YarnConfiguration.DEFAULT_RM_SCHEDULER_MINIMUM_ALLOCATION_MB);
   }
 
+  private static ResourceRequest cloneResourceRequest(ResourceRequest req) {
+    return ResourceRequest.newInstance(
+        Priority.newInstance(req.getPriority().getPriority()),
+        new String(req.getResourceName()),
+        Resource.newInstance(req.getCapability().getMemorySize(),
+            req.getCapability().getVirtualCores()),
+        req.getNumContainers(),
+        req.getRelaxLocality(),
+        req.getNodeLabelExpression() != null
+            ? new String(req.getNodeLabelExpression()) : null,
+        ExecutionTypeRequest.newInstance(
+            req.getExecutionTypeRequest().getExecutionType()));
+  }
+
+  private static List<ResourceRequest> cloneResourceRequests(
+      List<ResourceRequest> reqs) {
+    List<ResourceRequest> cloneReqs = new ArrayList<>();
+    for (ResourceRequest req : reqs) {
+      cloneReqs.add(cloneResourceRequest(req));
+    }
+    return cloneReqs;
+  }
 }

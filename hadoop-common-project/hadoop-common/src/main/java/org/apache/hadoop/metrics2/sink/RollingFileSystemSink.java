@@ -36,7 +36,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.commons.configuration.SubsetConfiguration;
+import org.apache.commons.configuration2.SubsetConfiguration;
 import org.apache.commons.lang.time.FastDateFormat;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
@@ -485,10 +485,10 @@ public class RollingFileSystemSink implements MetricsSink, Closeable {
 
     try {
       fs.append(basePath);
+    } catch (UnsupportedOperationException ex) {
+      canAppend = false;
     } catch (IOException ex) {
-      if (ex.getMessage().equals("Not supported")) {
-        canAppend = false;
-      }
+      // Ignore. The operation is supported.
     }
 
     return canAppend;

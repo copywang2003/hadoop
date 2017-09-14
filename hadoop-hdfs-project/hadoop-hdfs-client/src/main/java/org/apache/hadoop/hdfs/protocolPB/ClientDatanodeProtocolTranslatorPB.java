@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.protocolPB;
 import java.io.Closeable;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
 import java.util.List;
 
 import javax.net.SocketFactory;
@@ -34,6 +35,7 @@ import org.apache.hadoop.hdfs.protocol.BlockLocalPathInfo;
 import org.apache.hadoop.hdfs.protocol.ClientDatanodeProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.DatanodeLocalInfo;
+import org.apache.hadoop.hdfs.protocol.DatanodeVolumeInfo;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.DeleteBlockPoolRequestProto;
@@ -45,6 +47,9 @@ import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetBlo
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetDatanodeInfoRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetDatanodeInfoResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetReplicaVisibleLengthRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetVolumeReportRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.GetVolumeReportResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.DatanodeVolumeInfoProto;
 import org.apache.hadoop.hdfs.protocol.proto.ReconfigurationProtocolProtos.ListReconfigurablePropertiesRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ReconfigurationProtocolProtos.ListReconfigurablePropertiesResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientDatanodeProtocolProtos.RefreshNamenodesRequestProto;
@@ -73,6 +78,7 @@ import org.apache.hadoop.security.token.Token;
 
 import com.google.protobuf.RpcController;
 import com.google.protobuf.ServiceException;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -96,6 +102,9 @@ public class ClientDatanodeProtocolTranslatorPB implements
       RefreshNamenodesRequestProto.newBuilder().build();
   private final static GetDatanodeInfoRequestProto VOID_GET_DATANODE_INFO =
       GetDatanodeInfoRequestProto.newBuilder().build();
+  private final static GetVolumeReportRequestProto
+      VOID_GET_DATANODE_STORAGE_INFO =
+      GetVolumeReportRequestProto.newBuilder().build();
   private final static GetReconfigurationStatusRequestProto VOID_GET_RECONFIG_STATUS =
       GetReconfigurationStatusRequestProto.newBuilder().build();
   private final static StartReconfigurationRequestProto VOID_START_RECONFIG =
@@ -342,19 +351,22 @@ public class ClientDatanodeProtocolTranslatorPB implements
    *               local copies of these plans.
    * @param planVersion - The data format of the plans - for future , not
    *                    used now.
-   * @param plan - Actual plan.
+   * @param planFile - Plan file name
+   * @param planData - Actual plan data in json format
    * @param skipDateCheck - Skips the date check.
    * @throws IOException
    */
   @Override
   public void submitDiskBalancerPlan(String planID, long planVersion,
-      String plan, boolean skipDateCheck) throws IOException {
+        String planFile, String planData, boolean skipDateCheck)
+      throws IOException {
     try {
       SubmitDiskBalancerPlanRequestProto request =
           SubmitDiskBalancerPlanRequestProto.newBuilder()
               .setPlanID(planID)
               .setPlanVersion(planVersion)
-              .setPlan(plan)
+              .setPlanFile(planFile)
+              .setPlan(planData)
               .setIgnoreDateCheck(skipDateCheck)
               .build();
       rpcProxy.submitDiskBalancerPlan(NULL_CONTROLLER, request);
@@ -366,7 +378,7 @@ public class ClientDatanodeProtocolTranslatorPB implements
   /**
    * Cancels an executing disk balancer plan.
    *
-   * @param planID - A SHA512 hash of the plan string.
+   * @param planID - A SHA-1 hash of the plan string.
    * @throws IOException on error
    */
   @Override
@@ -399,6 +411,7 @@ public class ClientDatanodeProtocolTranslatorPB implements
 
       return new DiskBalancerWorkStatus(result,
           response.hasPlanID() ? response.getPlanID() : null,
+          response.hasPlanFile() ? response.getPlanFile() : null,
           response.hasCurrentStatus() ? response.getCurrentStatus() : null);
     } catch (ServiceException e) {
       throw ProtobufHelper.getRemoteException(e);
@@ -413,6 +426,26 @@ public class ClientDatanodeProtocolTranslatorPB implements
       DiskBalancerSettingResponseProto response =
           rpcProxy.getDiskBalancerSetting(NULL_CONTROLLER, request);
       return response.hasValue() ? response.getValue() : null;
+    } catch (ServiceException e) {
+      throw ProtobufHelper.getRemoteException(e);
+    }
+  }
+
+  @Override
+  public List<DatanodeVolumeInfo> getVolumeReport() throws IOException {
+    try {
+      List<DatanodeVolumeInfo> volumeInfoList = new ArrayList<>();
+      GetVolumeReportResponseProto volumeReport = rpcProxy.getVolumeReport(
+          NULL_CONTROLLER, VOID_GET_DATANODE_STORAGE_INFO);
+      List<DatanodeVolumeInfoProto> volumeProtoList = volumeReport
+          .getVolumeInfoList();
+      for (DatanodeVolumeInfoProto proto : volumeProtoList) {
+        volumeInfoList.add(new DatanodeVolumeInfo(proto.getPath(), proto
+            .getUsedSpace(), proto.getFreeSpace(), proto.getReservedSpace(),
+            proto.getReservedSpaceForReplicas(), proto.getNumBlocks(),
+            PBHelperClient.convertStorageType(proto.getStorageType())));
+      }
+      return volumeInfoList;
     } catch (ServiceException e) {
       throw ProtobufHelper.getRemoteException(e);
     }

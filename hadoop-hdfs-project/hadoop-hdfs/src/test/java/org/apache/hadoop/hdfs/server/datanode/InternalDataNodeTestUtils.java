@@ -18,6 +18,7 @@
 
 package org.apache.hadoop.hdfs.server.datanode;
 
+import org.apache.hadoop.hdfs.server.protocol.SlowDiskReports;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -38,6 +39,7 @@ import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.HeartbeatResponse;
 import org.apache.hadoop.hdfs.server.protocol.NNHAStatusHeartbeat;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
+import org.apache.hadoop.hdfs.server.protocol.SlowPeerReports;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
 import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 import org.junit.Assert;
@@ -103,8 +105,11 @@ public class InternalDataNodeTestUtils {
    *
    * @throws IOException
    */
-  public static DataNode startDNWithMockNN(Configuration conf,
-      final InetSocketAddress nnSocketAddr, final String dnDataDir)
+  public static DataNode startDNWithMockNN(
+      Configuration conf,
+      final InetSocketAddress nnSocketAddr,
+      final InetSocketAddress nnServiceAddr,
+      final String dnDataDir)
       throws IOException {
 
     FileSystem.setDefaultUri(conf, "hdfs://" + nnSocketAddr.getHostName() + ":"
@@ -136,16 +141,18 @@ public class InternalDataNodeTestUtils {
             Mockito.any(StorageReport[].class), Mockito.anyLong(),
             Mockito.anyLong(), Mockito.anyInt(), Mockito.anyInt(),
             Mockito.anyInt(), Mockito.any(VolumeFailureSummary.class),
-            Mockito.anyBoolean())).thenReturn(
+            Mockito.anyBoolean(),
+            Mockito.any(SlowPeerReports.class),
+            Mockito.any(SlowDiskReports.class))).thenReturn(
         new HeartbeatResponse(new DatanodeCommand[0], new NNHAStatusHeartbeat(
             HAServiceState.ACTIVE, 1), null, ThreadLocalRandom.current()
             .nextLong() | 1L));
 
-    DataNode dn = new DataNode(conf, locations, null) {
+    DataNode dn = new DataNode(conf, locations, null, null) {
       @Override
       DatanodeProtocolClientSideTranslatorPB connectToNN(
           InetSocketAddress nnAddr) throws IOException {
-        Assert.assertEquals(nnSocketAddr, nnAddr);
+        Assert.assertEquals(nnServiceAddr, nnAddr);
         return namenode;
       }
     };

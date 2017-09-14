@@ -1,5 +1,3 @@
-package org.apache.hadoop.security.authentication.util;
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -17,6 +15,8 @@ package org.apache.hadoop.security.authentication.util;
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+package org.apache.hadoop.security.authentication.util;
 
 import java.io.IOException;
 
@@ -80,6 +80,28 @@ public class TestKerberosName {
     // no rules applied, these should pass
     checkTranslation("foo@ACME.COM", "foo@ACME.COM");
     checkTranslation("root/joe@FOO.COM", "root/joe@FOO.COM");
+  }
+
+  @Test
+  public void testParsing() throws Exception {
+    final String principalNameFull = "HTTP/abc.com@EXAMPLE.COM";
+    final String principalNameWoRealm = "HTTP/abc.com";
+    final String principalNameWoHost = "HTTP@EXAMPLE.COM";
+
+    final KerberosName kerbNameFull = new KerberosName(principalNameFull);
+    Assert.assertEquals("HTTP", kerbNameFull.getServiceName());
+    Assert.assertEquals("abc.com", kerbNameFull.getHostName());
+    Assert.assertEquals("EXAMPLE.COM", kerbNameFull.getRealm());
+
+    final KerberosName kerbNamewoRealm = new KerberosName(principalNameWoRealm);
+    Assert.assertEquals("HTTP", kerbNamewoRealm.getServiceName());
+    Assert.assertEquals("abc.com", kerbNamewoRealm.getHostName());
+    Assert.assertEquals(null, kerbNamewoRealm.getRealm());
+
+    final KerberosName kerbNameWoHost = new KerberosName(principalNameWoHost);
+    Assert.assertEquals("HTTP", kerbNameWoHost.getServiceName());
+    Assert.assertEquals(null, kerbNameWoHost.getHostName());
+    Assert.assertEquals("EXAMPLE.COM", kerbNameWoHost.getRealm());
   }
 
   @Test

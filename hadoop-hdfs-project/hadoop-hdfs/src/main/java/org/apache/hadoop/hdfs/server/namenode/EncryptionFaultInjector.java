@@ -35,5 +35,20 @@ public class EncryptionFaultInjector {
   }
 
   @VisibleForTesting
+  public void startFileNoKey() throws IOException {}
+
+  @VisibleForTesting
+  public void startFileBeforeGenerateKey() throws IOException {}
+
+  @VisibleForTesting
   public void startFileAfterGenerateKey() throws IOException {}
+
+  @VisibleForTesting
+  public void reencryptEncryptedKeys() throws IOException {}
+
+  @VisibleForTesting
+  public void reencryptUpdaterProcessOneTask() throws IOException {}
+
+  @VisibleForTesting
+  public void reencryptUpdaterProcessCheckpoint() throws IOException {}
 }

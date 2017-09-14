@@ -31,13 +31,14 @@ import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
 import javax.crypto.SecretKey;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.SettableFuture;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.Text;
-import org.apache.hadoop.ipc.CallerContext;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
 import org.apache.hadoop.service.AbstractService;
@@ -51,6 +52,7 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.EventHandler;
+import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.proto.YarnProtos.ReservationAllocationStateProto;
 import org.apache.hadoop.yarn.security.client.RMDelegationTokenIdentifier;
 import org.apache.hadoop.yarn.server.records.Version;
@@ -67,6 +69,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AggregateAppR
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptEventType;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptMetrics;
 import org.apache.hadoop.yarn.state.InvalidStateTransitionException;
 import org.apache.hadoop.yarn.state.MultipleArcTransition;
 import org.apache.hadoop.yarn.state.StateMachine;
@@ -83,7 +86,8 @@ import org.apache.hadoop.yarn.state.StateMachineFactory;
 public abstract class RMStateStore extends AbstractService {
 
   // constants for RM App state and RMDTSecretManagerState.
-  protected static final String RM_APP_ROOT = "RMAppRoot";
+  @VisibleForTesting
+  public static final String RM_APP_ROOT = "RMAppRoot";
   protected static final String RM_DT_SECRET_MANAGER_ROOT = "RMDTSecretManagerRoot";
   protected static final String DELEGATION_KEY_PREFIX = "DelegationKey_";
   protected static final String DELEGATION_TOKEN_PREFIX = "RMDelegationToken_";
@@ -95,6 +99,7 @@ public abstract class RMStateStore extends AbstractService {
       "ReservationSystemRoot";
   protected static final String VERSION_NODE = "RMVersionNode";
   protected static final String EPOCH_NODE = "EpochNode";
+  protected long baseEpoch;
   protected ResourceManager resourceManager;
   private final ReadLock readLock;
   private final WriteLock writeLock;
@@ -213,14 +218,21 @@ public abstract class RMStateStore extends AbstractService {
       LOG.info("Storing info for app: " + appId);
       try {
         store.storeApplicationStateInternal(appId, appState);
-        store.notifyApplication(new RMAppEvent(appId,
-               RMAppEventType.APP_NEW_SAVED));
+        store.notifyApplication(
+            new RMAppEvent(appId, RMAppEventType.APP_NEW_SAVED));
       } catch (Exception e) {
         LOG.error("Error storing app: " + appId, e);
-        isFenced = store.notifyStoreOperationFailedInternal(e);
+        if (e instanceof StoreLimitException) {
+          store.notifyApplication(
+              new RMAppEvent(appId, RMAppEventType.APP_SAVE_FAILED,
+                  e.getMessage()));
+        } else {
+          isFenced = store.notifyStoreOperationFailedInternal(e);
+        }
       }
       return finalState(isFenced);
     };
+
   }
 
   private static class UpdateAppTransition implements
@@ -237,6 +249,8 @@ public abstract class RMStateStore extends AbstractService {
       boolean isFenced = false;
       ApplicationStateData appState =
           ((RMStateUpdateAppEvent) event).getAppState();
+      SettableFuture<Object> result =
+          ((RMStateUpdateAppEvent) event).getResult();
       ApplicationId appId =
           appState.getApplicationSubmissionContext().getApplicationId();
       LOG.info("Updating info for app: " + appId);
@@ -246,9 +260,18 @@ public abstract class RMStateStore extends AbstractService {
           store.notifyApplication(new RMAppEvent(appId,
               RMAppEventType.APP_UPDATE_SAVED));
         }
+
+        if (result != null) {
+          result.set(null);
+        }
+
       } catch (Exception e) {
-        LOG.error("Error updating app: " + appId, e);
+        String msg = "Error updating app: " + appId;
+        LOG.error(msg, e);
         isFenced = store.notifyStoreOperationFailedInternal(e);
+        if (result != null) {
+          result.setException(new YarnException(msg, e));
+        }
       }
       return finalState(isFenced);
     };
@@ -656,15 +679,22 @@ public abstract class RMStateStore extends AbstractService {
   }
   
   AsyncDispatcher dispatcher;
+  @SuppressWarnings("rawtypes")
+  @VisibleForTesting
+  protected EventHandler rmStateStoreEventHandler;
 
   @Override
   protected void serviceInit(Configuration conf) throws Exception{
     // create async handler
-    dispatcher = new AsyncDispatcher();
+    dispatcher = new AsyncDispatcher("RM StateStore dispatcher");
     dispatcher.init(conf);
+    rmStateStoreEventHandler = new ForwardingEventHandler();
     dispatcher.register(RMStateStoreEventType.class, 
-                        new ForwardingEventHandler());
+                        rmStateStoreEventHandler);
     dispatcher.setDrainEventsOnStop();
+    // read the base epoch value from conf
+    baseEpoch = conf.getLong(YarnConfiguration.RM_EPOCH,
+        YarnConfiguration.DEFAULT_RM_EPOCH);
     initInternal(conf);
   }
 
@@ -774,18 +804,19 @@ public abstract class RMStateStore extends AbstractService {
     ApplicationStateData appState =
         ApplicationStateData.newInstance(app.getSubmitTime(),
             app.getStartTime(), context, app.getUser(), app.getCallerContext());
-    dispatcher.getEventHandler().handle(new RMStateStoreAppEvent(appState));
+    appState.setApplicationTimeouts(app.getApplicationTimeouts());
+    getRMStateStoreEventHandler().handle(new RMStateStoreAppEvent(appState));
   }
 
   @SuppressWarnings("unchecked")
-  public void updateApplicationState(
-      ApplicationStateData appState) {
-    dispatcher.getEventHandler().handle(new RMStateUpdateAppEvent(appState));
+  public void updateApplicationState(ApplicationStateData appState) {
+    getRMStateStoreEventHandler().handle(new RMStateUpdateAppEvent(appState));
   }
 
-  public void updateApplicationStateSynchronously(
-      ApplicationStateData appState, boolean notifyApp) {
-    handleStoreEvent(new RMStateUpdateAppEvent(appState, notifyApp));
+  public void updateApplicationStateSynchronously(ApplicationStateData appState,
+      boolean notifyApp, SettableFuture<Object> resultFuture) {
+    handleStoreEvent(
+        new RMStateUpdateAppEvent(appState, notifyApp, resultFuture));
   }
 
   public void updateFencedState() {
@@ -812,25 +843,25 @@ public abstract class RMStateStore extends AbstractService {
    */
   public void storeNewApplicationAttempt(RMAppAttempt appAttempt) {
     Credentials credentials = getCredentialsFromAppAttempt(appAttempt);
-
+    RMAppAttemptMetrics attempMetrics = appAttempt.getRMAppAttemptMetrics();
     AggregateAppResourceUsage resUsage =
-        appAttempt.getRMAppAttemptMetrics().getAggregateAppResourceUsage();
+        attempMetrics.getAggregateAppResourceUsage();
     ApplicationAttemptStateData attemptState =
         ApplicationAttemptStateData.newInstance(
             appAttempt.getAppAttemptId(),
             appAttempt.getMasterContainer(),
             credentials, appAttempt.getStartTime(),
-            resUsage.getMemorySeconds(),
-            resUsage.getVcoreSeconds());
+            resUsage.getResourceUsageSecondsMap(),
+            attempMetrics.getPreemptedResourceSecondsMap());
 
-    dispatcher.getEventHandler().handle(
+    getRMStateStoreEventHandler().handle(
       new RMStateStoreAppAttemptEvent(attemptState));
   }
 
   @SuppressWarnings("unchecked")
   public void updateApplicationAttemptState(
       ApplicationAttemptStateData attemptState) {
-    dispatcher.getEventHandler().handle(
+    getRMStateStoreEventHandler().handle(
       new RMStateUpdateAppAttemptEvent(attemptState));
   }
 
@@ -1002,7 +1033,8 @@ public abstract class RMStateStore extends AbstractService {
       appState.attempts.put(appAttempt.getAppAttemptId(), null);
     }
     
-    dispatcher.getEventHandler().handle(new RMStateStoreRemoveAppEvent(appState));
+    getRMStateStoreEventHandler().handle(
+        new RMStateStoreRemoveAppEvent(appState));
   }
 
   /**
@@ -1023,7 +1055,7 @@ public abstract class RMStateStore extends AbstractService {
   @SuppressWarnings("unchecked")
   public synchronized void removeApplicationAttempt(
       ApplicationAttemptId applicationAttemptId) {
-    dispatcher.getEventHandler().handle(
+    getRMStateStoreEventHandler().handle(
         new RMStateStoreRemoveAppAttemptEvent(applicationAttemptId));
   }
 
@@ -1105,21 +1137,18 @@ public abstract class RMStateStore extends AbstractService {
       Exception failureCause) {
     boolean isFenced = false;
     LOG.error("State store operation failed ", failureCause);
+
     if (HAUtil.isHAEnabled(getConfig())) {
-      LOG.warn("State-store fenced ! Transitioning RM to standby");
+      rmDispatcher.getEventHandler().handle(
+          new RMFatalEvent(RMFatalEventType.STATE_STORE_FENCED,
+              failureCause));
       isFenced = true;
-      Thread standByTransitionThread =
-          new Thread(new StandByTransitionThread());
-      standByTransitionThread.setName("StandByTransitionThread Handler");
-      standByTransitionThread.start();
-    } else if (YarnConfiguration.shouldRMFailFast(getConfig())) {
-      LOG.fatal("Fail RM now due to state-store error!");
+    } else {
       rmDispatcher.getEventHandler().handle(
           new RMFatalEvent(RMFatalEventType.STATE_STORE_OP_FAILED,
               failureCause));
-    } else {
-      LOG.warn("Skip the state-store error.");
     }
+
     return isFenced;
   }
  
@@ -1176,14 +1205,6 @@ public abstract class RMStateStore extends AbstractService {
     this.resourceManager = rm;
   }
 
-  private class StandByTransitionThread implements Runnable {
-    @Override
-    public void run() {
-      LOG.info("RMStateStore has been fenced");
-      resourceManager.handleTransitionToStandBy();
-    }
-  }
-
   public RMStateStoreState getRMStateStoreState() {
     this.readLock.lock();
     try {
@@ -1191,5 +1212,10 @@ public abstract class RMStateStore extends AbstractService {
     } finally {
       this.readLock.unlock();
     }
+  }
+
+  @SuppressWarnings("rawtypes")
+  protected EventHandler getRMStateStoreEventHandler() {
+    return dispatcher.getEventHandler();
   }
 }

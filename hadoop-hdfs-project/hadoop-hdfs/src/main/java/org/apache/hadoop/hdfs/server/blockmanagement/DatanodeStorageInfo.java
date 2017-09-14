@@ -18,6 +18,7 @@
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
@@ -93,13 +94,11 @@ public class DatanodeStorageInfo {
 
   private long capacity;
   private long dfsUsed;
+  private long nonDfsUsed;
   private volatile long remaining;
   private long blockPoolUsed;
 
   private final FoldedTreeSet<BlockInfo> blocks = new FoldedTreeSet<>();
-
-  // The ID of the last full block report which updated this storage.
-  private long lastBlockReportId = 0;
 
   /** The number of block reports received */
   private int blockReportCount = 0;
@@ -165,14 +164,6 @@ public class DatanodeStorageInfo {
     this.blockPoolUsed = blockPoolUsed;
   }
 
-  long getLastBlockReportId() {
-    return lastBlockReportId;
-  }
-
-  void setLastBlockReportId(long lastBlockReportId) {
-    this.lastBlockReportId = lastBlockReportId;
-  }
-
   State getState() {
     return this.state;
   }
@@ -200,6 +191,10 @@ public class DatanodeStorageInfo {
 
   long getDfsUsed() {
     return dfsUsed;
+  }
+
+  long getNonDfsUsed() {
+    return nonDfsUsed;
   }
 
   long getRemaining() {
@@ -276,13 +271,18 @@ public class DatanodeStorageInfo {
     return blocks.size();
   }
   
+  /**
+   * @return iterator to an unmodifiable set of blocks
+   * related to this {@link DatanodeStorageInfo}
+   */
   Iterator<BlockInfo> getBlockIterator() {
-    return blocks.iterator();
+    return Collections.unmodifiableSet(blocks).iterator();
   }
 
   void updateState(StorageReport r) {
     capacity = r.getCapacity();
     dfsUsed = r.getDfsUsed();
+    nonDfsUsed = r.getNonDfsUsed();
     remaining = r.getRemaining();
     blockPoolUsed = r.getBlockPoolUsed();
   }
@@ -332,7 +332,7 @@ public class DatanodeStorageInfo {
   StorageReport toStorageReport() {
     return new StorageReport(
         new DatanodeStorage(storageID, state, storageType),
-        false, capacity, dfsUsed, remaining, blockPoolUsed);
+        false, capacity, dfsUsed, remaining, blockPoolUsed, nonDfsUsed);
   }
 
   /**
@@ -393,7 +393,12 @@ public class DatanodeStorageInfo {
     return null;
   }
 
-  static enum AddBlockResult {
+  @VisibleForTesting
+  void setRemainingForTests(int remaining) {
+    this.remaining = remaining;
+  }
+
+  enum AddBlockResult {
     ADDED, REPLACED, ALREADY_EXIST
   }
 }

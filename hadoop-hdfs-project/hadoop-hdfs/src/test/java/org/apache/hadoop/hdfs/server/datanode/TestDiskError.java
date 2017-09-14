@@ -23,10 +23,14 @@ import static org.junit.Assert.assertTrue;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.concurrent.TimeUnit;
 
+import com.google.common.base.Supplier;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
@@ -37,19 +41,22 @@ import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.protocol.datatransfer.BlockConstructionStage;
 import org.apache.hadoop.hdfs.protocol.datatransfer.Sender;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.DataChecksum;
-import org.apache.hadoop.util.Time;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 /**
  * Test that datanodes can correctly handle errors during block read/write.
@@ -64,6 +71,9 @@ public class TestDiskError {
   public void setUp() throws Exception {
     conf = new HdfsConfiguration();
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, 512L);
+    conf.setTimeDuration(
+        DFSConfigKeys.DFS_DATANODE_DISK_CHECK_MIN_GAP_KEY,
+        0, TimeUnit.MILLISECONDS);
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
     cluster.waitActive();
     fs = cluster.getFileSystem();
@@ -157,7 +167,8 @@ public class TestDiskError {
         BlockTokenSecretManager.DUMMY_TOKEN, "",
         new DatanodeInfo[0], new StorageType[0], null,
         BlockConstructionStage.PIPELINE_SETUP_CREATE, 1, 0L, 0L, 0L,
-        checksum, CachingStrategy.newDefaultStrategy(), false, false, null);
+        checksum, CachingStrategy.newDefaultStrategy(), false, false,
+        null, null, new String[0]);
     out.flush();
 
     // close the connection before sending the content of the block
@@ -194,8 +205,7 @@ public class TestDiskError {
       try (FsDatasetSpi.FsVolumeReferences volumes =
           dn.getFSDataset().getFsVolumeReferences()) {
         for (FsVolumeSpi vol : volumes) {
-          String dir = vol.getBasePath();
-          Path dataDir = new Path(dir);
+          Path dataDir = new Path(vol.getStorageLocation().getNormalizedUri());
           FsPermission actual = localFS.getFileStatus(dataDir).getPermission();
           assertEquals("Permission for dir: " + dataDir + ", is " + actual +
               ", while expected is " + expected, expected, actual);
@@ -209,18 +219,71 @@ public class TestDiskError {
    * Before refactoring the code the above function was not getting called 
    * @throws IOException, InterruptedException
    */
-  @Test
-  public void testcheckDiskError() throws IOException, InterruptedException {
+  @Test(timeout=60000)
+  public void testcheckDiskError() throws Exception {
     if(cluster.getDataNodes().size() <= 0) {
       cluster.startDataNodes(conf, 1, true, null, null);
       cluster.waitActive();
     }
     DataNode dataNode = cluster.getDataNodes().get(0);
-    long slackTime = dataNode.checkDiskErrorInterval/2;
     //checking for disk error
-    dataNode.checkDiskErrorAsync();
-    Thread.sleep(dataNode.checkDiskErrorInterval);
-    long lastDiskErrorCheck = dataNode.getLastDiskErrorCheck();
-    assertTrue("Disk Error check is not performed within  " + dataNode.checkDiskErrorInterval +  "  ms", ((Time.monotonicNow()-lastDiskErrorCheck) < (dataNode.checkDiskErrorInterval + slackTime)));
+    final long lastCheckTimestamp = dataNode.getLastDiskErrorCheck();
+    dataNode.checkDiskError();
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        return dataNode.getLastDiskErrorCheck() > lastCheckTimestamp;
+      }
+    }, 100, 60000);
+  }
+
+  @Test
+  public void testDataTransferWhenBytesPerChecksumIsZero() throws IOException {
+    DataNode dn0 = cluster.getDataNodes().get(0);
+    // Make a mock blockScanner class and return false whenever isEnabled is
+    // called on blockScanner
+    BlockScanner mockScanner = Mockito.mock(BlockScanner.class);
+    Mockito.when(mockScanner.isEnabled()).thenReturn(false);
+    dn0.setBlockScanner(mockScanner);
+    Path filePath = new Path("test.dat");
+    FSDataOutputStream out = fs.create(filePath, (short) 1);
+    out.write(1);
+    out.hflush();
+    out.close();
+    // Corrupt the metadata file. Insert all 0's in the type and
+    // bytesPerChecksum files of the metadata header.
+    ExtendedBlock block = DFSTestUtil.getFirstBlock(fs, filePath);
+    File metadataFile = cluster.getBlockMetadataFile(0, block);
+    RandomAccessFile raFile = new RandomAccessFile(metadataFile, "rw");
+    raFile.seek(2);
+    raFile.writeByte(0);
+    raFile.writeInt(0);
+    raFile.close();
+    String datanodeId0 = dn0.getDatanodeUuid();
+    LocatedBlock lb = DFSTestUtil.getAllBlocks(fs, filePath).get(0);
+    String storageId = lb.getStorageIDs()[0];
+    cluster.startDataNodes(conf, 1, true, null, null);
+    DataNode dn1 = null;
+    for (int i = 0; i < cluster.getDataNodes().size(); i++) {
+      if (!cluster.getDataNodes().get(i).equals(datanodeId0)) {
+        dn1 = cluster.getDataNodes().get(i);
+        break;
+      }
+    }
+    DatanodeDescriptor dnd1 =
+        NameNodeAdapter.getDatanode(cluster.getNamesystem(),
+            dn1.getDatanodeId());
+
+    dn0.transferBlock(block, new DatanodeInfo[]{dnd1},
+        new StorageType[]{StorageType.DISK}, new String[0]);
+    // Sleep for 1 second so the DataTrasnfer daemon can start transfer.
+    try {
+      Thread.sleep(1000);
+    } catch (InterruptedException e) {
+      // Do nothing
+    }
+    Mockito.verify(mockScanner).markSuspectBlock(Mockito.eq(storageId),
+        Mockito.eq(block));
+
   }
 }

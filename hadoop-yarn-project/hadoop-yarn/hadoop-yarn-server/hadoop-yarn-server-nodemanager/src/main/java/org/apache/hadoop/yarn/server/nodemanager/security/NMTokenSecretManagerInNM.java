@@ -23,9 +23,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -45,8 +45,8 @@ import com.google.common.annotations.VisibleForTesting;
 
 public class NMTokenSecretManagerInNM extends BaseNMTokenSecretManager {
 
-  private static final Log LOG = LogFactory
-    .getLog(NMTokenSecretManagerInNM.class);
+  private static final Logger LOG =
+       LoggerFactory.getLogger(NMTokenSecretManagerInNM.class);
   
   private MasterKeyData previousMasterKey;
   
@@ -191,8 +191,10 @@ public class NMTokenSecretManagerInNM extends BaseNMTokenSecretManager {
   public synchronized void appFinished(ApplicationId appId) {
     List<ApplicationAttemptId> appAttemptList = appToAppAttemptMap.get(appId);
     if (appAttemptList != null) {
-      LOG.debug("Removing application attempts NMToken keys for application "
-          + appId);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Removing application attempts NMToken keys for application "
+            + appId);
+      }
       for (ApplicationAttemptId appAttemptId : appAttemptList) {
         removeAppAttemptKey(appAttemptId);
       }
@@ -226,8 +228,10 @@ public class NMTokenSecretManagerInNM extends BaseNMTokenSecretManager {
     if (oldKey == null
         || oldKey.getMasterKey().getKeyId() != identifier.getKeyId()) {
       // Update key only if it is modified.
-      LOG.debug("NMToken key updated for application attempt : "
-          + identifier.getApplicationAttemptId().toString());
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("NMToken key updated for application attempt : "
+            + identifier.getApplicationAttemptId().toString());
+      }
       if (identifier.getKeyId() == currentMasterKey.getMasterKey()
         .getKeyId()) {
         updateAppAttemptKey(appAttemptId, currentMasterKey);
@@ -243,7 +247,9 @@ public class NMTokenSecretManagerInNM extends BaseNMTokenSecretManager {
   }
   
   public synchronized void setNodeId(NodeId nodeId) {
-    LOG.debug("updating nodeId : " + nodeId);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("updating nodeId : " + nodeId);
+    }
     this.nodeId = nodeId;
   }
   

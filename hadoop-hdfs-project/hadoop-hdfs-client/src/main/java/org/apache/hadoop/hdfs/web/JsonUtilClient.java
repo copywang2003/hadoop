@@ -17,8 +17,12 @@
  */
 package org.apache.hadoop.hdfs.web;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.ContentSummary.Builder;
 import org.apache.hadoop.fs.FileChecksum;
@@ -32,9 +36,11 @@ import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSUtilClient;
+import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo.DatanodeInfoBuilder;
+import org.apache.hadoop.hdfs.protocol.DirectoryListing;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
-import org.apache.hadoop.hdfs.protocol.FsPermissionExtension;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
@@ -46,14 +52,15 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.StringUtils;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.map.ObjectReader;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 
@@ -90,16 +97,8 @@ class JsonUtilClient {
   }
 
   /** Convert a string to a FsPermission object. */
-  static FsPermission toFsPermission(
-      final String s, Boolean aclBit, Boolean encBit) {
-    FsPermission perm = new FsPermission(Short.parseShort(s, 8));
-    final boolean aBit = (aclBit != null) ? aclBit : false;
-    final boolean eBit = (encBit != null) ? encBit : false;
-    if (aBit || eBit) {
-      return new FsPermissionExtension(perm, aBit, eBit);
-    } else {
-      return perm;
-    }
+  static FsPermission toFsPermission(final String s) {
+    return null == s ? null : new FsPermission(Short.parseShort(s, 8));
   }
 
   /** Convert a Json map to a HdfsFileStatus object. */
@@ -120,9 +119,23 @@ class JsonUtilClient {
     final long len = ((Number) m.get("length")).longValue();
     final String owner = (String) m.get("owner");
     final String group = (String) m.get("group");
-    final FsPermission permission = toFsPermission((String) m.get("permission"),
-        (Boolean) m.get("aclBit"),
-        (Boolean) m.get("encBit"));
+    final FsPermission permission = toFsPermission((String)m.get("permission"));
+
+    Boolean aclBit = (Boolean) m.get("aclBit");
+    Boolean encBit = (Boolean) m.get("encBit");
+    Boolean erasureBit  = (Boolean) m.get("ecBit");
+    EnumSet<HdfsFileStatus.Flags> f =
+        EnumSet.noneOf(HdfsFileStatus.Flags.class);
+    if (aclBit != null && aclBit) {
+      f.add(HdfsFileStatus.Flags.HAS_ACL);
+    }
+    if (encBit != null && encBit) {
+      f.add(HdfsFileStatus.Flags.HAS_CRYPT);
+    }
+    if (erasureBit != null && erasureBit) {
+      f.add(HdfsFileStatus.Flags.HAS_EC);
+    }
+
     final long aTime = ((Number) m.get("accessTime")).longValue();
     final long mTime = ((Number) m.get("modificationTime")).longValue();
     final long blockSize = ((Number) m.get("blockSize")).longValue();
@@ -134,11 +147,43 @@ class JsonUtilClient {
     final byte storagePolicy = m.containsKey("storagePolicy") ?
         (byte) ((Number) m.get("storagePolicy")).longValue() :
         HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED;
-    return new HdfsFileStatus(len, type == WebHdfsConstants.PathType.DIRECTORY,
-        replication, blockSize, mTime, aTime, permission, owner, group,
-        symlink, DFSUtilClient.string2Bytes(localName),
-        fileId, childrenNum, null,
-        storagePolicy, null);
+    return new HdfsFileStatus(len,
+        type == WebHdfsConstants.PathType.DIRECTORY, replication, blockSize,
+        mTime, aTime, permission, f, owner, group, symlink,
+        DFSUtilClient.string2Bytes(localName), fileId, childrenNum,
+        null, storagePolicy, null);
+  }
+
+  static HdfsFileStatus[] toHdfsFileStatusArray(final Map<?, ?> json) {
+    Preconditions.checkNotNull(json);
+    final Map<?, ?> rootmap =
+        (Map<?, ?>)json.get(FileStatus.class.getSimpleName() + "es");
+    final List<?> array = JsonUtilClient.getList(rootmap,
+        FileStatus.class.getSimpleName());
+
+    // convert FileStatus
+    Preconditions.checkNotNull(array);
+    final HdfsFileStatus[] statuses = new HdfsFileStatus[array.size()];
+    int i = 0;
+    for (Object object : array) {
+      final Map<?, ?> m = (Map<?, ?>) object;
+      statuses[i++] = JsonUtilClient.toFileStatus(m, false);
+    }
+    return statuses;
+  }
+
+  static DirectoryListing toDirectoryListing(final Map<?, ?> json) {
+    if (json == null) {
+      return null;
+    }
+    final Map<?, ?> listing = getMap(json, "DirectoryListing");
+    final Map<?, ?> partialListing = getMap(listing, "partialListing");
+    HdfsFileStatus[] fileStatuses = toHdfsFileStatusArray(partialListing);
+
+    int remainingEntries = getInt(listing, "remainingEntries", -1);
+    Preconditions.checkState(remainingEntries != -1,
+        "remainingEntries was not set");
+    return new DirectoryListing(fileStatuses, remainingEntries);
   }
 
   /** Convert a Json map to an ExtendedBlock object. */
@@ -189,6 +234,15 @@ class JsonUtilClient {
     }
   }
 
+  static Map<?, ?> getMap(Map<?, ?> m, String key) {
+    Object map = m.get(key);
+    if (map instanceof Map<?, ?>) {
+      return (Map<?, ?>) map;
+    } else {
+      return null;
+    }
+  }
+
   /** Convert a Json map to an DatanodeInfo object. */
   static DatanodeInfo toDatanodeInfo(final Map<?, ?> m)
       throws IOException {
@@ -228,27 +282,28 @@ class JsonUtilClient {
     }
 
     // TODO: Fix storageID
-    return new DatanodeInfo(
-        ipAddr,
-        (String)m.get("hostName"),
-        (String)m.get("storageID"),
-        xferPort,
-        ((Number) m.get("infoPort")).intValue(),
-        getInt(m, "infoSecurePort", 0),
-        ((Number) m.get("ipcPort")).intValue(),
-
-        getLong(m, "capacity", 0l),
-        getLong(m, "dfsUsed", 0l),
-        getLong(m, "remaining", 0l),
-        getLong(m, "blockPoolUsed", 0l),
-        getLong(m, "cacheCapacity", 0l),
-        getLong(m, "cacheUsed", 0l),
-        getLong(m, "lastUpdate", 0l),
-        getLong(m, "lastUpdateMonotonic", 0l),
-        getInt(m, "xceiverCount", 0),
-        getString(m, "networkLocation", ""),
-        DatanodeInfo.AdminStates.valueOf(getString(m, "adminState", "NORMAL")),
-        getString(m, "upgradeDomain", ""));
+    return new DatanodeInfoBuilder().setIpAddr(ipAddr)
+        .setHostName((String) m.get("hostName"))
+        .setDatanodeUuid((String) m.get("storageID")).setXferPort(xferPort)
+        .setInfoPort(((Number) m.get("infoPort")).intValue())
+        .setInfoSecurePort(getInt(m, "infoSecurePort", 0))
+        .setIpcPort(((Number) m.get("ipcPort")).intValue())
+        .setCapacity(getLong(m, "capacity", 0L))
+        .setDfsUsed(getLong(m, "dfsUsed", 0L))
+        .setRemaining(getLong(m, "remaining", 0L))
+        .setBlockPoolUsed(getLong(m, "blockPoolUsed", 0L))
+        .setCacheCapacity(getLong(m, "cacheCapacity", 0L))
+        .setCacheUsed(getLong(m, "cacheUsed", 0L))
+        .setLastUpdate(getLong(m, "lastUpdate", 0L))
+        .setLastUpdateMonotonic(getLong(m, "lastUpdateMonotonic", 0L))
+        .setXceiverCount(getInt(m, "xceiverCount", 0))
+        .setNetworkLocation(getString(m, "networkLocation", "")).setAdminState(
+            DatanodeInfo.AdminStates
+                .valueOf(getString(m, "adminState", "NORMAL")))
+        .setUpgradeDomain(getString(m, "upgradeDomain", ""))
+        .setLastBlockReportTime(getLong(m, "lastBlockReportTime", 0L))
+        .setLastBlockReportMonotonic(getLong(m, "lastBlockReportMonotonic", 0L))
+        .build();
   }
 
   /** Convert an Object[] to a DatanodeInfo[]. */
@@ -414,8 +469,7 @@ class JsonUtilClient {
     aclStatusBuilder.stickyBit((Boolean) m.get("stickyBit"));
     String permString = (String) m.get("permission");
     if (permString != null) {
-      final FsPermission permission = toFsPermission(permString,
-          (Boolean) m.get("aclBit"), (Boolean) m.get("encBit"));
+      final FsPermission permission = toFsPermission(permString);
       aclStatusBuilder.setPermission(permission);
     }
     final List<?> entries = (List<?>) m.get("entries");
@@ -480,7 +534,7 @@ class JsonUtilClient {
     }
 
     final String namesInJson = (String) json.get("XAttrNames");
-    ObjectReader reader = new ObjectMapper().reader(List.class);
+    ObjectReader reader = new ObjectMapper().readerFor(List.class);
     final List<Object> xattrs = reader.readValue(namesInJson);
     final List<String> names =
         Lists.newArrayListWithCapacity(json.keySet().size());
@@ -545,4 +599,102 @@ class JsonUtilClient {
         lastLocatedBlock, isLastBlockComplete, null, null);
   }
 
+  public static Collection<BlockStoragePolicy> getStoragePolicies(
+      Map<?, ?> json) {
+    Map<?, ?> policiesJson = (Map<?, ?>) json.get("BlockStoragePolicies");
+    if (policiesJson != null) {
+      List<?> objs = (List<?>) policiesJson.get(BlockStoragePolicy.class
+          .getSimpleName());
+      if (objs != null) {
+        BlockStoragePolicy[] storagePolicies = new BlockStoragePolicy[objs
+            .size()];
+        for (int i = 0; i < objs.size(); i++) {
+          final Map<?, ?> m = (Map<?, ?>) objs.get(i);
+          BlockStoragePolicy blockStoragePolicy = toBlockStoragePolicy(m);
+          storagePolicies[i] = blockStoragePolicy;
+        }
+        return Arrays.asList(storagePolicies);
+      }
+    }
+    return new ArrayList<BlockStoragePolicy>(0);
+  }
+
+  public static BlockStoragePolicy toBlockStoragePolicy(Map<?, ?> m) {
+    byte id = ((Number) m.get("id")).byteValue();
+    String name = (String) m.get("name");
+    StorageType[] storageTypes = toStorageTypes((List<?>) m
+        .get("storageTypes"));
+    StorageType[] creationFallbacks = toStorageTypes((List<?>) m
+        .get("creationFallbacks"));
+    StorageType[] replicationFallbacks = toStorageTypes((List<?>) m
+        .get("replicationFallbacks"));
+    Boolean copyOnCreateFile = (Boolean) m.get("copyOnCreateFile");
+    return new BlockStoragePolicy(id, name, storageTypes, creationFallbacks,
+        replicationFallbacks, copyOnCreateFile.booleanValue());
+  }
+
+  private static StorageType[] toStorageTypes(List<?> list) {
+    if (list == null) {
+      return null;
+    } else {
+      StorageType[] storageTypes = new StorageType[list.size()];
+      for (int i = 0; i < list.size(); i++) {
+        storageTypes[i] = StorageType.parseStorageType((String) list.get(i));
+      }
+      return storageTypes;
+    }
+  }
+
+  static BlockLocation[] toBlockLocationArray(Map<?, ?> json)
+      throws IOException{
+    final Map<?, ?> rootmap =
+        (Map<?, ?>)json.get(BlockLocation.class.getSimpleName() + "s");
+    final List<?> array = JsonUtilClient.getList(rootmap,
+        BlockLocation.class.getSimpleName());
+
+    Preconditions.checkNotNull(array);
+    final BlockLocation[] locations = new BlockLocation[array.size()];
+    int i = 0;
+    for (Object object : array) {
+      final Map<?, ?> m = (Map<?, ?>) object;
+      locations[i++] = JsonUtilClient.toBlockLocation(m);
+    }
+    return locations;
+  }
+
+  /** Convert a Json map to BlockLocation. **/
+  static BlockLocation toBlockLocation(Map<?, ?> m)
+      throws IOException{
+    if(m == null) {
+      return null;
+    }
+
+    long length = ((Number) m.get("length")).longValue();
+    long offset = ((Number) m.get("offset")).longValue();
+    boolean corrupt = Boolean.
+        getBoolean(m.get("corrupt").toString());
+    String[] storageIds = toStringArray(getList(m, "storageIds"));
+    String[] cachedHosts = toStringArray(getList(m, "cachedHosts"));
+    String[] hosts = toStringArray(getList(m, "hosts"));
+    String[] names = toStringArray(getList(m, "names"));
+    String[] topologyPaths = toStringArray(getList(m, "topologyPaths"));
+    StorageType[] storageTypes = toStorageTypeArray(
+        getList(m, "storageTypes"));
+    return new BlockLocation(names, hosts, cachedHosts,
+        topologyPaths, storageIds, storageTypes,
+        offset, length, corrupt);
+  }
+
+  static String[] toStringArray(List<?> list) {
+    if (list == null) {
+      return null;
+    } else {
+      final String[] array = new String[list.size()];
+      int i = 0;
+      for (Object object : list) {
+        array[i++] = object.toString();
+      }
+      return array;
+    }
+  }
 }

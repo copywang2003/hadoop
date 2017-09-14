@@ -48,6 +48,7 @@ import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskAttemptId;
 import org.apache.hadoop.mapreduce.v2.api.records.TaskType;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
+import org.apache.hadoop.mapreduce.v2.app.MRAppMaster;
 import org.apache.hadoop.mapreduce.v2.app.client.ClientService;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobCounterUpdateEvent;
 import org.apache.hadoop.mapreduce.v2.app.job.event.JobDiagnosticsUpdateEvent;
@@ -149,11 +150,11 @@ public class RMContainerAllocator extends RMContainerRequestor
     new LinkedList<ContainerRequest>();
 
   //holds information about the assigned containers to task attempts
-  private final AssignedRequests assignedRequests = new AssignedRequests();
-  
+  private final AssignedRequests assignedRequests;
+
   //holds scheduled requests to be fulfilled by RM
   private final ScheduledRequests scheduledRequests = new ScheduledRequests();
-  
+
   private int containersAllocated = 0;
   private int containersReleased = 0;
   private int hostLocalAssigned = 0;
@@ -199,6 +200,11 @@ public class RMContainerAllocator extends RMContainerRequestor
     this.preemptionPolicy = preemptionPolicy;
     this.stopped = new AtomicBoolean(false);
     this.clock = context.getClock();
+    this.assignedRequests = createAssignedRequests();
+  }
+
+  protected AssignedRequests createAssignedRequests() {
+    return new AssignedRequests();
   }
 
   @Override
@@ -231,9 +237,11 @@ public class RMContainerAllocator extends RMContainerRequestor
     // Init startTime to current time. If all goes well, it will be reset after
     // first attempt to contact RM.
     retrystartTime = System.currentTimeMillis();
-    this.scheduledRequests.setNumOpportunisticMapsPer100(
-        conf.getInt(MRJobConfig.MR_NUM_OPPORTUNISTIC_MAPS_PER_100,
-            MRJobConfig.DEFAULT_MR_NUM_OPPORTUNISTIC_MAPS_PER_100));
+    this.scheduledRequests.setNumOpportunisticMapsPercent(
+        conf.getInt(MRJobConfig.MR_NUM_OPPORTUNISTIC_MAPS_PERCENT,
+            MRJobConfig.DEFAULT_MR_NUM_OPPORTUNISTIC_MAPS_PERCENT));
+    LOG.info(this.scheduledRequests.getNumOpportunisticMapsPercent() +
+        "% of the mappers will be scheduled using OPPORTUNISTIC containers");
   }
 
   @Override
@@ -332,6 +340,12 @@ public class RMContainerAllocator extends RMContainerRequestor
     return scheduledRequests;
   }
 
+  @Private
+  @VisibleForTesting
+  int getNumOfPendingReduces() {
+    return pendingReduces.size();
+  }
+
   public boolean getIsReduceStarted() {
     return reduceStarted;
   }
@@ -358,76 +372,16 @@ public class RMContainerAllocator extends RMContainerRequestor
     }
   }
 
-  @SuppressWarnings({ "unchecked" })
   protected synchronized void handleEvent(ContainerAllocatorEvent event) {
     recalculateReduceSchedule = true;
     if (event.getType() == ContainerAllocator.EventType.CONTAINER_REQ) {
       ContainerRequestEvent reqEvent = (ContainerRequestEvent) event;
-      JobId jobId = getJob().getID();
-      Resource supportedMaxContainerCapability = getMaxContainerCapability();
-      if (reqEvent.getAttemptID().getTaskId().getTaskType().equals(TaskType.MAP)) {
-        if (mapResourceRequest.equals(Resources.none())) {
-          mapResourceRequest = reqEvent.getCapability();
-          eventHandler.handle(new JobHistoryEvent(jobId,
-            new NormalizedResourceEvent(
-              org.apache.hadoop.mapreduce.TaskType.MAP, mapResourceRequest
-                .getMemorySize())));
-          LOG.info("mapResourceRequest:" + mapResourceRequest);
-          if (mapResourceRequest.getMemorySize() > supportedMaxContainerCapability
-            .getMemorySize()
-              || mapResourceRequest.getVirtualCores() > supportedMaxContainerCapability
-                .getVirtualCores()) {
-            String diagMsg =
-                "MAP capability required is more than the supported "
-                    + "max container capability in the cluster. Killing the Job. mapResourceRequest: "
-                    + mapResourceRequest + " maxContainerCapability:"
-                    + supportedMaxContainerCapability;
-            LOG.info(diagMsg);
-            eventHandler.handle(new JobDiagnosticsUpdateEvent(jobId, diagMsg));
-            eventHandler.handle(new JobEvent(jobId, JobEventType.JOB_KILL));
-          }
-        }
-        // set the resources
-        reqEvent.getCapability().setMemory(mapResourceRequest.getMemorySize());
-        reqEvent.getCapability().setVirtualCores(
-          mapResourceRequest.getVirtualCores());
-        scheduledRequests.addMap(reqEvent);//maps are immediately scheduled
+      boolean isMap = reqEvent.getAttemptID().getTaskId().getTaskType().
+          equals(TaskType.MAP);
+      if (isMap) {
+        handleMapContainerRequest(reqEvent);
       } else {
-        if (reduceResourceRequest.equals(Resources.none())) {
-          reduceResourceRequest = reqEvent.getCapability();
-          eventHandler.handle(new JobHistoryEvent(jobId,
-            new NormalizedResourceEvent(
-              org.apache.hadoop.mapreduce.TaskType.REDUCE,
-              reduceResourceRequest.getMemorySize())));
-          LOG.info("reduceResourceRequest:" + reduceResourceRequest);
-          if (reduceResourceRequest.getMemorySize() > supportedMaxContainerCapability
-            .getMemorySize()
-              || reduceResourceRequest.getVirtualCores() > supportedMaxContainerCapability
-                .getVirtualCores()) {
-            String diagMsg =
-                "REDUCE capability required is more than the "
-                    + "supported max container capability in the cluster. Killing the "
-                    + "Job. reduceResourceRequest: " + reduceResourceRequest
-                    + " maxContainerCapability:"
-                    + supportedMaxContainerCapability;
-            LOG.info(diagMsg);
-            eventHandler.handle(new JobDiagnosticsUpdateEvent(jobId, diagMsg));
-            eventHandler.handle(new JobEvent(jobId, JobEventType.JOB_KILL));
-          }
-        }
-        // set the resources
-        reqEvent.getCapability().setMemory(reduceResourceRequest.getMemorySize());
-        reqEvent.getCapability().setVirtualCores(
-          reduceResourceRequest.getVirtualCores());
-        if (reqEvent.getEarlierAttemptFailed()) {
-          //add to the front of queue for fail fast
-          pendingReduces.addFirst(new ContainerRequest(reqEvent,
-              PRIORITY_REDUCE, reduceNodeLabelExpression));
-        } else {
-          pendingReduces.add(new ContainerRequest(reqEvent, PRIORITY_REDUCE,
-              reduceNodeLabelExpression));
-          //reduces are added to pending and are slowly ramped up
-        }
+        handleReduceContainerRequest(reqEvent);
       }
       
     } else if (
@@ -461,6 +415,103 @@ public class RMContainerAllocator extends RMContainerRequestor
       // propagate failures to preemption policy to discard checkpoints for
       // failed tasks
       preemptionPolicy.handleFailedContainer(event.getAttemptID());
+    }
+  }
+
+  @SuppressWarnings({ "unchecked" })
+  private void handleReduceContainerRequest(ContainerRequestEvent reqEvent) {
+    assert(reqEvent.getAttemptID().getTaskId().getTaskType().equals(
+        TaskType.REDUCE));
+
+    Resource supportedMaxContainerCapability = getMaxContainerCapability();
+    JobId jobId = getJob().getID();
+
+    if (reduceResourceRequest.equals(Resources.none())) {
+      reduceResourceRequest = reqEvent.getCapability();
+      eventHandler.handle(new JobHistoryEvent(jobId,
+          new NormalizedResourceEvent(
+              org.apache.hadoop.mapreduce.TaskType.REDUCE,
+              reduceResourceRequest.getMemorySize())));
+      LOG.info("reduceResourceRequest:" + reduceResourceRequest);
+    }
+
+    boolean reduceContainerRequestAccepted = true;
+    if (reduceResourceRequest.getMemorySize() >
+        supportedMaxContainerCapability.getMemorySize()
+        ||
+        reduceResourceRequest.getVirtualCores() >
+        supportedMaxContainerCapability.getVirtualCores()) {
+      reduceContainerRequestAccepted = false;
+    }
+
+    if (reduceContainerRequestAccepted) {
+      // set the resources
+      reqEvent.getCapability().setVirtualCores(
+          reduceResourceRequest.getVirtualCores());
+      reqEvent.getCapability().setMemorySize(
+          reduceResourceRequest.getMemorySize());
+
+      if (reqEvent.getEarlierAttemptFailed()) {
+        //previously failed reducers are added to the front for fail fast
+        pendingReduces.addFirst(new ContainerRequest(reqEvent,
+            PRIORITY_REDUCE, reduceNodeLabelExpression));
+      } else {
+        //reduces are added to pending queue and are slowly ramped up
+        pendingReduces.add(new ContainerRequest(reqEvent,
+            PRIORITY_REDUCE, reduceNodeLabelExpression));
+      }
+    } else {
+      String diagMsg = "REDUCE capability required is more than the " +
+          "supported max container capability in the cluster. Killing" +
+          " the Job. reduceResourceRequest: " + reduceResourceRequest +
+          " maxContainerCapability:" + supportedMaxContainerCapability;
+      LOG.info(diagMsg);
+      eventHandler.handle(new JobDiagnosticsUpdateEvent(jobId, diagMsg));
+      eventHandler.handle(new JobEvent(jobId, JobEventType.JOB_KILL));
+    }
+  }
+
+  @SuppressWarnings({ "unchecked" })
+  private void handleMapContainerRequest(ContainerRequestEvent reqEvent) {
+    assert(reqEvent.getAttemptID().getTaskId().getTaskType().equals(
+        TaskType.MAP));
+
+    Resource supportedMaxContainerCapability = getMaxContainerCapability();
+    JobId jobId = getJob().getID();
+
+    if (mapResourceRequest.equals(Resources.none())) {
+      mapResourceRequest = reqEvent.getCapability();
+      eventHandler.handle(new JobHistoryEvent(jobId,
+          new NormalizedResourceEvent(
+              org.apache.hadoop.mapreduce.TaskType.MAP,
+              mapResourceRequest.getMemorySize())));
+      LOG.info("mapResourceRequest:" + mapResourceRequest);
+    }
+
+    boolean mapContainerRequestAccepted = true;
+    if (mapResourceRequest.getMemorySize() >
+        supportedMaxContainerCapability.getMemorySize()
+        ||
+        mapResourceRequest.getVirtualCores() >
+        supportedMaxContainerCapability.getVirtualCores()) {
+      mapContainerRequestAccepted = false;
+    }
+
+    if(mapContainerRequestAccepted) {
+      // set the resources
+      reqEvent.getCapability().setMemorySize(
+          mapResourceRequest.getMemorySize());
+      reqEvent.getCapability().setVirtualCores(
+          mapResourceRequest.getVirtualCores());
+      scheduledRequests.addMap(reqEvent); //maps are immediately scheduled
+    } else {
+      String diagMsg = "The required MAP capability is more than the " +
+          "supported max container capability in the cluster. Killing" +
+          " the Job. mapResourceRequest: " + mapResourceRequest +
+          " maxContainerCapability:" + supportedMaxContainerCapability;
+      LOG.info(diagMsg);
+      eventHandler.handle(new JobDiagnosticsUpdateEvent(jobId, diagMsg));
+      eventHandler.handle(new JobEvent(jobId, JobEventType.JOB_KILL));
     }
   }
 
@@ -515,15 +566,20 @@ public class RMContainerAllocator extends RMContainerRequestor
     }
 
     // The pending mappers haven't been waiting for too long. Let us see if
-    // the headroom can fit a mapper.
-    Resource availableResourceForMap = getAvailableResources();
+    // there are enough resources for a mapper to run. This is calculated by
+    // excluding scheduled reducers from headroom and comparing it against
+    // resources required to run one mapper.
+    Resource scheduledReducesResource = Resources.multiply(
+         reduceResourceRequest, scheduledRequests.reduces.size());
+    Resource availableResourceForMap =
+         Resources.subtract(getAvailableResources(), scheduledReducesResource);
     if (ResourceCalculatorUtils.computeAvailableContainers(availableResourceForMap,
         mapResourceRequest, getSchedulerResourceTypes()) > 0) {
-      // the available headroom is enough to run a mapper
+       // Enough room to run a mapper
       return false;
     }
 
-    // Available headroom is not enough to run mapper. See if we should hold
+    // Available resources are not enough to run mapper. See if we should hold
     // off before preempting reducers and preempt if okay.
     return preemptReducersForHangingMapRequests(reducerNoHeadroomPreemptionDelayMs);
   }
@@ -792,7 +848,8 @@ public class RMContainerAllocator extends RMContainerRequestor
       updateAMRMToken(response.getAMRMToken());
     }
 
-    List<ContainerStatus> finishedContainers = response.getCompletedContainersStatuses();
+    List<ContainerStatus> finishedContainers =
+        response.getCompletedContainersStatuses();
 
     // propagate preemption requests
     final PreemptionMessage preemptReq = response.getPreemptionMessage();
@@ -821,34 +878,47 @@ public class RMContainerAllocator extends RMContainerRequestor
 
     handleUpdatedNodes(response);
     handleJobPriorityChange(response);
-
+    // Handle receiving the timeline collector address and token for this app.
+    MRAppMaster.RunningAppContext appContext =
+        (MRAppMaster.RunningAppContext)this.getContext();
+    if (appContext.getTimelineV2Client() != null) {
+      appContext.getTimelineV2Client().
+          setTimelineCollectorInfo(response.getCollectorInfo());
+    }
     for (ContainerStatus cont : finishedContainers) {
-      LOG.info("Received completed container " + cont.getContainerId());
-      TaskAttemptId attemptID = assignedRequests.get(cont.getContainerId());
-      if (attemptID == null) {
-        LOG.error("Container complete event for unknown container id "
-            + cont.getContainerId());
-      } else {
-        pendingRelease.remove(cont.getContainerId());
-        assignedRequests.remove(attemptID);
-        
-        // send the container completed event to Task attempt
-        eventHandler.handle(createContainerFinishedEvent(cont, attemptID));
-        
-        // Send the diagnostics
-        String diagnostics = StringInterner.weakIntern(cont.getDiagnostics());
-        eventHandler.handle(new TaskAttemptDiagnosticsUpdateEvent(attemptID,
-            diagnostics));
-
-        preemptionPolicy.handleCompletedContainer(attemptID);
-      }
+      processFinishedContainer(cont);
     }
     return newContainers;
   }
 
+  @SuppressWarnings("unchecked")
+  @VisibleForTesting
+  void processFinishedContainer(ContainerStatus container) {
+    LOG.info("Received completed container " + container.getContainerId());
+    TaskAttemptId attemptID = assignedRequests.get(container.getContainerId());
+    if (attemptID == null) {
+      LOG.error("Container complete event for unknown container "
+          + container.getContainerId());
+    } else {
+      pendingRelease.remove(container.getContainerId());
+      assignedRequests.remove(attemptID);
+
+      // Send the diagnostics
+      String diagnostic = StringInterner.weakIntern(container.getDiagnostics());
+      eventHandler.handle(new TaskAttemptDiagnosticsUpdateEvent(attemptID,
+          diagnostic));
+
+      // send the container completed event to Task attempt
+      eventHandler.handle(createContainerFinishedEvent(container, attemptID));
+
+      preemptionPolicy.handleCompletedContainer(attemptID);
+    }
+  }
+
   private void applyConcurrentTaskLimits() {
     int numScheduledMaps = scheduledRequests.maps.size();
-    if (maxRunningMaps > 0 && numScheduledMaps > 0) {
+    if (maxRunningMaps > 0 && numScheduledMaps > 0 &&
+        getJob().getTotalMaps() > maxRunningMaps) {
       int maxRequestedMaps = Math.max(0,
           maxRunningMaps - assignedRequests.maps.size());
       int numScheduledFailMaps = scheduledRequests.earlierFailedMaps.size();
@@ -865,7 +935,8 @@ public class RMContainerAllocator extends RMContainerRequestor
     }
 
     int numScheduledReduces = scheduledRequests.reduces.size();
-    if (maxRunningReduces > 0 && numScheduledReduces > 0) {
+    if (maxRunningReduces > 0 && numScheduledReduces > 0 &&
+        getJob().getTotalReduces() > maxRunningReduces) {
       int maxRequestedReduces = Math.max(0,
           maxRunningReduces - assignedRequests.reduces.size());
       int reduceRequestLimit = Math.min(maxRequestedReduces,
@@ -969,11 +1040,6 @@ public class RMContainerAllocator extends RMContainerRequestor
       Resources.add(assignedMapResource, assignedReduceResource));
   }
 
-  @VisibleForTesting
-  public int getNumOfPendingReduces() {
-    return pendingReduces.size();
-  }
-
   @Private
   @VisibleForTesting
   class ScheduledRequests {
@@ -990,10 +1056,14 @@ public class RMContainerAllocator extends RMContainerRequestor
     final Map<TaskAttemptId, ContainerRequest> maps =
       new LinkedHashMap<TaskAttemptId, ContainerRequest>();
     int mapsMod100 = 0;
-    int numOpportunisticMapsPer100 = 0;
+    int numOpportunisticMapsPercent = 0;
 
-    void setNumOpportunisticMapsPer100(int numMaps) {
-      this.numOpportunisticMapsPer100 = numMaps;
+    void setNumOpportunisticMapsPercent(int numMaps) {
+      this.numOpportunisticMapsPercent = numMaps;
+    }
+
+    int getNumOpportunisticMapsPercent() {
+      return this.numOpportunisticMapsPercent;
     }
 
     @VisibleForTesting
@@ -1040,7 +1110,7 @@ public class RMContainerAllocator extends RMContainerRequestor
         maps.put(event.getAttemptID(), request);
         addContainerReq(request);
       } else {
-        if (mapsMod100 < numOpportunisticMapsPer100) {
+        if (mapsMod100 < numOpportunisticMapsPercent) {
           request =
               new ContainerRequest(event, PRIORITY_OPPORTUNISTIC_MAP,
                   mapNodeLabelExpression);

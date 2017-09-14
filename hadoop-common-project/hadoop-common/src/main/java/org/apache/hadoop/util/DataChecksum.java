@@ -122,8 +122,8 @@ public class DataChecksum implements Checksum {
     int bpc = in.readInt();
     DataChecksum summer = newDataChecksum(Type.valueOf(type), bpc );
     if ( summer == null ) {
-      throw new IOException( "Could not create DataChecksum of type " +
-                             type + " with bytesPerChecksum " + bpc );
+      throw new InvalidChecksumSizeException("Could not create DataChecksum "
+          + "of type " + type + " with bytesPerChecksum " + bpc);
     }
     return summer;
   }
@@ -296,15 +296,23 @@ public class DataChecksum implements Checksum {
   public void verifyChunkedSums(ByteBuffer data, ByteBuffer checksums,
       String fileName, long basePos) throws ChecksumException {
     if (type.size == 0) return;
-    
+
     if (data.hasArray() && checksums.hasArray()) {
       final int dataOffset = data.arrayOffset() + data.position();
       final int crcsOffset = checksums.arrayOffset() + checksums.position();
-      verifyChunked(type, summer, data.array(), dataOffset, data.remaining(),
-          bytesPerChecksum, checksums.array(), crcsOffset, fileName, basePos);
+
+      if (NativeCrc32.isAvailable()) {
+        NativeCrc32.verifyChunkedSumsByteArray(bytesPerChecksum, type.id,
+                checksums.array(), crcsOffset, data.array(), dataOffset,
+                data.remaining(), fileName, basePos);
+      } else {
+        verifyChunked(type, summer, data.array(), dataOffset, data.remaining(),
+                bytesPerChecksum, checksums.array(), crcsOffset, fileName,
+                basePos);
+      }
       return;
     }
-    if (NativeCrc32.isAvailable()) {
+    if (NativeCrc32.isAvailable() && data.isDirect()) {
       NativeCrc32.verifyChunkedSums(bytesPerChecksum, type.id, checksums, data,
           fileName, basePos);
     } else {

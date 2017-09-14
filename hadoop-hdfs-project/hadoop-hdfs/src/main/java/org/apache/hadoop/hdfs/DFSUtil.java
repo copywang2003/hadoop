@@ -35,10 +35,12 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMESERVICE_ID;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_SERVER_HTTPS_KEYPASSWORD_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_SERVER_HTTPS_KEYSTORE_PASSWORD_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_SERVER_HTTPS_TRUSTSTORE_PASSWORD_KEY;
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_NAMENODE_SERVICE_RPC_PORT_DEFAULT;
 
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.io.UnsupportedEncodingException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -71,6 +73,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.http.HttpConfig;
@@ -81,10 +84,10 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AccessControlList;
+import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.ToolRunner;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Charsets;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -126,40 +129,10 @@ public class DFSUtil {
   }
 
   /**
-   * Compartor for sorting DataNodeInfo[] based on decommissioned states.
-   * Decommissioned nodes are moved to the end of the array on sorting with
-   * this compartor.
+   * Comparator for sorting DataNodeInfo[] based on
+   * decommissioned and entering_maintenance states.
    */
-  public static final Comparator<DatanodeInfo> DECOM_COMPARATOR = 
-    new Comparator<DatanodeInfo>() {
-      @Override
-      public int compare(DatanodeInfo a, DatanodeInfo b) {
-        return a.isDecommissioned() == b.isDecommissioned() ? 0 : 
-          a.isDecommissioned() ? 1 : -1;
-      }
-    };
-
-
-  /**
-   * Comparator for sorting DataNodeInfo[] based on decommissioned/stale states.
-   * Decommissioned/stale nodes are moved to the end of the array on sorting
-   * with this comparator.
-   */ 
-  @InterfaceAudience.Private 
-  public static class DecomStaleComparator implements Comparator<DatanodeInfo> {
-    private final long staleInterval;
-
-    /**
-     * Constructor of DecomStaleComparator
-     * 
-     * @param interval
-     *          The time interval for marking datanodes as stale is passed from
-     *          outside, since the interval may be changed dynamically
-     */
-    public DecomStaleComparator(long interval) {
-      this.staleInterval = interval;
-    }
-
+  public static class ServiceComparator implements Comparator<DatanodeInfo> {
     @Override
     public int compare(DatanodeInfo a, DatanodeInfo b) {
       // Decommissioned nodes will still be moved to the end of the list
@@ -168,6 +141,45 @@ public class DFSUtil {
       } else if (b.isDecommissioned()) {
         return -1;
       }
+
+      // ENTERING_MAINTENANCE nodes should be after live nodes.
+      if (a.isEnteringMaintenance()) {
+        return b.isEnteringMaintenance() ? 0 : 1;
+      } else if (b.isEnteringMaintenance()) {
+        return -1;
+      } else {
+        return 0;
+      }
+    }
+  }
+
+  /**
+   * Comparator for sorting DataNodeInfo[] based on
+   * stale, decommissioned and entering_maintenance states.
+   * Order: live -> stale -> entering_maintenance -> decommissioned
+   */
+  @InterfaceAudience.Private 
+  public static class ServiceAndStaleComparator extends ServiceComparator {
+    private final long staleInterval;
+
+    /**
+     * Constructor of ServiceAndStaleComparator
+     * 
+     * @param interval
+     *          The time interval for marking datanodes as stale is passed from
+     *          outside, since the interval may be changed dynamically
+     */
+    public ServiceAndStaleComparator(long interval) {
+      this.staleInterval = interval;
+    }
+
+    @Override
+    public int compare(DatanodeInfo a, DatanodeInfo b) {
+      int ret = super.compare(a, b);
+      if (ret != 0) {
+        return ret;
+      }
+
       // Stale nodes will be moved behind the normal nodes
       boolean aStale = a.isStale(staleInterval);
       boolean bStale = b.isStale(staleInterval);
@@ -249,12 +261,7 @@ public class DFSUtil {
    * @return The decoded string
    */
   public static String bytes2String(byte[] bytes, int offset, int length) {
-    try {
-      return new String(bytes, offset, length, "UTF8");
-    } catch(UnsupportedEncodingException e) {
-      assert false : "UTF8 encoding is not supported ";
-    }
-    return null;
+    return DFSUtilClient.bytes2String(bytes, 0, bytes.length);
   }
 
   /**
@@ -267,26 +274,40 @@ public class DFSUtil {
   /**
    * Given a list of path components returns a path as a UTF8 String
    */
-  public static String byteArray2PathString(byte[][] pathComponents,
-      int offset, int length) {
-    if (pathComponents.length == 0) {
+  public static String byteArray2PathString(final byte[][] components,
+      final int offset, final int length) {
+    // specifically not using StringBuilder to more efficiently build
+    // string w/o excessive byte[] copies and charset conversions.
+    final int range = offset + length;
+    Preconditions.checkPositionIndexes(offset, range, components.length);
+    if (length == 0) {
       return "";
     }
-    Preconditions.checkArgument(offset >= 0 && offset < pathComponents.length);
-    Preconditions.checkArgument(length >= 0 && offset + length <=
-        pathComponents.length);
-    if (pathComponents.length == 1
-        && (pathComponents[0] == null || pathComponents[0].length == 0)) {
-      return Path.SEPARATOR;
+    // absolute paths start with either null or empty byte[]
+    byte[] firstComponent = components[offset];
+    boolean isAbsolute = (offset == 0 &&
+        (firstComponent == null || firstComponent.length == 0));
+    if (offset == 0 && length == 1) {
+      return isAbsolute ? Path.SEPARATOR : bytes2String(firstComponent);
     }
-    StringBuilder result = new StringBuilder();
-    for (int i = offset; i < offset + length; i++) {
-      result.append(new String(pathComponents[i], Charsets.UTF_8));
-      if (i < pathComponents.length - 1) {
-        result.append(Path.SEPARATOR_CHAR);
-      }
+    // compute length of full byte[], seed with 1st component and delimiters
+    int pos = isAbsolute ? 0 : firstComponent.length;
+    int size = pos + length - 1;
+    for (int i=offset + 1; i < range; i++) {
+      size += components[i].length;
     }
-    return result.toString();
+    final byte[] result = new byte[size];
+    if (!isAbsolute) {
+      System.arraycopy(firstComponent, 0, result, 0, firstComponent.length);
+    }
+    // append remaining components as "/component".
+    for (int i=offset + 1; i < range; i++) {
+      result[pos++] = (byte)Path.SEPARATOR_CHAR;
+      int len = components[i].length;
+      System.arraycopy(components[i], 0, result, pos, len);
+      pos += len;
+    }
+    return bytes2String(result);
   }
 
   public static String byteArray2PathString(byte[][] pathComponents) {
@@ -320,6 +341,15 @@ public class DFSUtil {
   }
 
   /**
+   * Convert a UTF8 string to an array of byte arrays.
+   */
+  public static byte[][] getPathComponents(String path) {
+    // avoid intermediate split to String[]
+    final byte[] bytes = string2Bytes(path);
+    return bytes2byteArray(bytes, bytes.length, (byte)Path.SEPARATOR_CHAR);
+  }
+
+  /**
    * Splits the array of bytes into array of arrays of bytes
    * on byte separator
    * @param bytes the array of bytes to split
@@ -339,40 +369,37 @@ public class DFSUtil {
   public static byte[][] bytes2byteArray(byte[] bytes,
                                          int len,
                                          byte separator) {
-    assert len <= bytes.length;
-    int splits = 0;
+    Preconditions.checkPositionIndex(len, bytes.length);
     if (len == 0) {
       return new byte[][]{null};
     }
-    // Count the splits. Omit multiple separators and the last one
-    for (int i = 0; i < len; i++) {
-      if (bytes[i] == separator) {
+    // Count the splits. Omit multiple separators and the last one by
+    // peeking at prior byte.
+    int splits = 0;
+    for (int i = 1; i < len; i++) {
+      if (bytes[i-1] == separator && bytes[i] != separator) {
         splits++;
       }
-    }
-    int last = len - 1;
-    while (last > -1 && bytes[last--] == separator) {
-      splits--;
     }
     if (splits == 0 && bytes[0] == separator) {
       return new byte[][]{null};
     }
     splits++;
     byte[][] result = new byte[splits][];
-    int startIndex = 0;
     int nextIndex = 0;
-    int index = 0;
-    // Build the splits
-    while (index < splits) {
+    // Build the splits.
+    for (int i = 0; i < splits; i++) {
+      int startIndex = nextIndex;
+      // find next separator in the bytes.
       while (nextIndex < len && bytes[nextIndex] != separator) {
         nextIndex++;
       }
-      result[index] = new byte[nextIndex - startIndex];
-      System.arraycopy(bytes, startIndex, result[index], 0, nextIndex
-              - startIndex);
-      index++;
-      startIndex = nextIndex + 1;
-      nextIndex = startIndex;
+      result[i] = (nextIndex > 0)
+          ? Arrays.copyOfRange(bytes, startIndex, nextIndex)
+          : DFSUtilClient.EMPTY_BYTES; // reuse empty bytes for root.
+      do { // skip over separators.
+        nextIndex++;
+      } while (nextIndex < len && bytes[nextIndex] == separator);
     }
     return result;
   }
@@ -428,19 +455,6 @@ public class DFSUtil {
   }
 
   /**
-   * Returns list of InetSocketAddress corresponding to HA NN RPC addresses from
-   * the configuration.
-   * 
-   * @param conf configuration
-   * @return list of InetSocketAddresses
-   */
-  public static Map<String, Map<String, InetSocketAddress>> getHaNnRpcAddresses(
-      Configuration conf) {
-    return DFSUtilClient.getAddresses(conf, null,
-                                      DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY);
-  }
-
-  /**
    * Returns list of InetSocketAddress corresponding to  backup node rpc 
    * addresses from the configuration.
    * 
@@ -479,61 +493,25 @@ public class DFSUtil {
   }
 
   /**
-   * Returns list of InetSocketAddresses corresponding to namenodes from the
-   * configuration.
-   * 
-   * Returns namenode address specifically configured for datanodes (using
-   * service ports), if found. If not, regular RPC address configured for other
-   * clients is returned.
-   * 
-   * @param conf configuration
-   * @return list of InetSocketAddress
-   * @throws IOException on error
-   */
-  public static Map<String, Map<String, InetSocketAddress>> getNNServiceRpcAddresses(
-      Configuration conf) throws IOException {
-    // Use default address as fall back
-    String defaultAddress;
-    try {
-      defaultAddress = NetUtils.getHostPortString(
-          DFSUtilClient.getNNAddress(conf));
-    } catch (IllegalArgumentException e) {
-      defaultAddress = null;
-    }
-    
-    Map<String, Map<String, InetSocketAddress>> addressList =
-      DFSUtilClient.getAddresses(conf, defaultAddress,
-                                 DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY,
-                                 DFS_NAMENODE_RPC_ADDRESS_KEY);
-    if (addressList.isEmpty()) {
-      throw new IOException("Incorrect configuration: namenode address "
-          + DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY + " or "  
-          + DFS_NAMENODE_RPC_ADDRESS_KEY
-          + " is not configured.");
-    }
-    return addressList;
-  }
-
-  /**
    * Returns list of InetSocketAddresses corresponding to the namenode
    * that manages this cluster. Note this is to be used by datanodes to get
    * the list of namenode addresses to talk to.
    *
-   * Returns namenode address specifically configured for datanodes (using
-   * service ports), if found. If not, regular RPC address configured for other
-   * clients is returned.
+   * Returns namenode address specifically configured for datanodes
    *
    * @param conf configuration
    * @return list of InetSocketAddress
    * @throws IOException on error
    */
   public static Map<String, Map<String, InetSocketAddress>>
-    getNNServiceRpcAddressesForCluster(Configuration conf) throws IOException {
+      getNNServiceRpcAddresses(Configuration conf) throws IOException {
     // Use default address as fall back
     String defaultAddress;
     try {
-      defaultAddress = NetUtils.getHostPortString(
-          DFSUtilClient.getNNAddress(conf));
+      InetSocketAddress rpcAddress = DFSUtilClient.getNNAddress(conf);
+      InetSocketAddress serviceAddress = InetSocketAddress.createUnresolved(
+          rpcAddress.getHostName(), DFS_NAMENODE_SERVICE_RPC_PORT_DEFAULT);
+      defaultAddress = NetUtils.getHostPortString(serviceAddress);
     } catch (IllegalArgumentException e) {
       defaultAddress = null;
     }
@@ -556,16 +534,46 @@ public class DFSUtil {
       }
     }
 
+    // If true, then replace the port numbers in the final address list
+    // with the default service RPC port.
+    boolean replacePortNumbers = false;
+
+    // First try to lookup using the service RPC address keys.
     Map<String, Map<String, InetSocketAddress>> addressList =
-            DFSUtilClient.getAddressesForNsIds(conf, parentNameServices,
-                                               defaultAddress,
-                                               DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY,
-                                               DFS_NAMENODE_RPC_ADDRESS_KEY);
+            DFSUtilClient.getAddressesForNsIds(
+                conf, parentNameServices, null,
+                DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY);
+
+    // Next try to lookup using the RPC address key.
+    if (addressList.isEmpty()) {
+      replacePortNumbers = true;
+      addressList = DFSUtilClient.getAddressesForNsIds(
+          conf, parentNameServices, null, DFS_NAMENODE_RPC_ADDRESS_KEY);
+    }
+
+    // Finally, fallback to the default address.
+    // This will not yield the correct address in a federated/HA setup.
+    if (addressList.isEmpty()) {
+      addressList = DFSUtilClient.getAddressesForNsIds(
+          conf, parentNameServices, defaultAddress);
+    }
+
     if (addressList.isEmpty()) {
       throw new IOException("Incorrect configuration: namenode address "
-              + DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY + " or "
-              + DFS_NAMENODE_RPC_ADDRESS_KEY
-              + " is not configured.");
+          + DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY + " or "
+          + DFS_NAMENODE_RPC_ADDRESS_KEY
+          + " is not configured.");
+    }
+
+    if (replacePortNumbers) {
+      // Replace the RPC port(s) with the default service RPC port(s)
+      addressList.forEach((nsId, addresses) -> {
+        addresses.forEach((nnId, address) -> {
+          InetSocketAddress serviceAddress = InetSocketAddress.createUnresolved(
+              address.getHostName(), DFS_NAMENODE_SERVICE_RPC_PORT_DEFAULT);
+          addresses.put(nnId, serviceAddress);
+        });
+      });
     }
     return addressList;
   }
@@ -671,7 +679,7 @@ public class DFSUtil {
   
   public static String nnAddressesAsString(Configuration conf) {
     Map<String, Map<String, InetSocketAddress>> addresses =
-      getHaNnRpcAddresses(conf);
+        DFSUtilClient.getHaNnRpcAddresses(conf);
     return addressMapToString(addresses);
   }
 
@@ -718,10 +726,11 @@ public class DFSUtil {
 
   /**
    * Get a URI for each internal nameservice. If a nameservice is
-   * HA-enabled, then the logical URI of the nameservice is returned. If the
-   * nameservice is not HA-enabled, then a URI corresponding to an RPC address
-   * of the single NN for that nameservice is returned, preferring the service
-   * RPC address over the client RPC address.
+   * HA-enabled, and the configured failover proxy provider supports logical
+   * URIs, then the logical URI of the nameservice is returned.
+   * Otherwise, a URI corresponding to an RPC address of the single NN for that
+   * nameservice is returned, preferring the service RPC address over the
+   * client RPC address.
    * 
    * @param conf configuration
    * @return a collection of all configured NN URIs, preferring service
@@ -735,9 +744,10 @@ public class DFSUtil {
 
   /**
    * Get a URI for each configured nameservice. If a nameservice is
-   * HA-enabled, then the logical URI of the nameservice is returned. If the
-   * nameservice is not HA-enabled, then a URI corresponding to the address of
-   * the single NN for that nameservice is returned.
+   * HA-enabled, and the configured failover proxy provider supports logical
+   * URIs, then the logical URI of the nameservice is returned.
+   * Otherwise, a URI corresponding to the address of the single NN for that
+   * nameservice is returned.
    * 
    * @param conf configuration
    * @param keys configuration keys to try in order to get the URI for non-HA
@@ -756,13 +766,22 @@ public class DFSUtil {
     Set<URI> nonPreferredUris = new HashSet<URI>();
     
     for (String nsId : nameServices) {
-      if (HAUtil.isHAEnabled(conf, nsId)) {
+      URI nsUri = createUri(HdfsConstants.HDFS_URI_SCHEME, nsId, -1);
+      /**
+       * Determine whether the logical URI of the name service can be resolved
+       * by the configured failover proxy provider. If not, we should try to
+       * resolve the URI here
+       */
+      boolean useLogicalUri = false;
+      try {
+        useLogicalUri = HAUtil.useLogicalUri(conf, nsUri);
+      } catch (IOException e){
+        LOG.warn("Getting exception  while trying to determine if nameservice "
+            + nsId + " can use logical URI: " + e);
+      }
+      if (HAUtil.isHAEnabled(conf, nsId) && useLogicalUri) {
         // Add the logical URI of the nameservice.
-        try {
-          ret.add(new URI(HdfsConstants.HDFS_URI_SCHEME + "://" + nsId));
-        } catch (URISyntaxException ue) {
-          throw new IllegalArgumentException(ue);
-        }
+        ret.add(nsUri);
       } else {
         // Add the URI corresponding to the address of the NN.
         boolean uriFound = false;
@@ -787,7 +806,8 @@ public class DFSUtil {
     for (String key : keys) {
       String addr = conf.get(key);
       if (addr != null) {
-        URI uri = createUri("hdfs", NetUtils.createSocketAddr(addr));
+        URI uri = createUri(HdfsConstants.HDFS_URI_SCHEME,
+            NetUtils.createSocketAddr(addr));
         if (!uriFound) {
           uriFound = true;
           ret.add(uri);
@@ -805,19 +825,21 @@ public class DFSUtil {
     // nor the rpc-address (which overrides defaultFS) is given.
     if (!uriFound) {
       URI defaultUri = FileSystem.getDefaultUri(conf);
+      if (defaultUri != null) {
+        // checks if defaultUri is ip:port format
+        // and convert it to hostname:port format
+        if (defaultUri.getPort() != -1) {
+          defaultUri = createUri(defaultUri.getScheme(),
+              NetUtils.createSocketAddr(defaultUri.getHost(),
+                  defaultUri.getPort()));
+        }
 
-      // checks if defaultUri is ip:port format
-      // and convert it to hostname:port format
-      if (defaultUri != null && (defaultUri.getPort() != -1)) {
-        defaultUri = createUri(defaultUri.getScheme(),
-            NetUtils.createSocketAddr(defaultUri.getHost(),
-                defaultUri.getPort()));
-      }
+        defaultUri = trimUri(defaultUri);
 
-      if (defaultUri != null &&
-          HdfsConstants.HDFS_URI_SCHEME.equals(defaultUri.getScheme()) &&
-          !nonPreferredUris.contains(defaultUri)) {
-        ret.add(defaultUri);
+        if (HdfsConstants.HDFS_URI_SCHEME.equals(defaultUri.getScheme()) &&
+            !nonPreferredUris.contains(defaultUri)) {
+          ret.add(defaultUri);
+        }
       }
     }
     
@@ -1146,16 +1168,30 @@ public class DFSUtil {
     public boolean match(InetSocketAddress s);
   }
 
-  /** Create a URI from the scheme and address */
+  /** Create an URI from scheme and address. */
   public static URI createUri(String scheme, InetSocketAddress address) {
+    return createUri(scheme, address.getHostName(), address.getPort());
+  }
+
+  /** Create an URI from scheme, host, and port. */
+  public static URI createUri(String scheme, String host, int port) {
     try {
-      return new URI(scheme, null, address.getHostName(), address.getPort(),
-          null, null, null);
-    } catch (URISyntaxException ue) {
-      throw new IllegalArgumentException(ue);
+      return new URI(scheme, null, host, port, null, null, null);
+    } catch (URISyntaxException x) {
+      throw new IllegalArgumentException(x.getMessage(), x);
     }
   }
-  
+
+  /** Remove unnecessary path from HDFS URI. */
+  static URI trimUri(URI uri) {
+    String path = uri.getPath();
+    if (HdfsConstants.HDFS_URI_SCHEME.equals(uri.getScheme()) &&
+        path != null && !path.isEmpty()) {
+      uri = createUri(uri.getScheme(), uri.getHost(), uri.getPort());
+    }
+    return uri;
+  }
+
   /**
    * Add protobuf based protocol to the {@link org.apache.hadoop.ipc.RPC.Server}
    * @param conf configuration
@@ -1189,12 +1225,17 @@ public class DFSUtil {
     String serviceAddrKey = DFSUtilClient.concatSuffixes(
         DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY, nsId, nnId);
 
-    String addrKey = DFSUtilClient.concatSuffixes(
-        DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY, nsId, nnId);
-
     String serviceRpcAddr = conf.get(serviceAddrKey);
     if (serviceRpcAddr == null) {
-      serviceRpcAddr = conf.get(addrKey);
+      String addrKey = DFSUtilClient.concatSuffixes(
+          DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY, nsId, nnId);
+      String rpcAddress = conf.get(addrKey);
+      if (rpcAddress != null) {
+        InetSocketAddress rpcAddr = NetUtils.createSocketAddr(rpcAddress);
+        InetSocketAddress serviceAddr = InetSocketAddress.createUnresolved(
+            rpcAddr.getHostName(), DFS_NAMENODE_SERVICE_RPC_PORT_DEFAULT);
+        serviceRpcAddr = NetUtils.getHostPortString(serviceAddr);
+      }
     }
     return serviceRpcAddr;
   }
@@ -1532,5 +1573,23 @@ public class DFSUtil {
     KeyProviderCryptoExtension cryptoProvider = KeyProviderCryptoExtension
         .createKeyProviderCryptoExtension(keyProvider);
     return cryptoProvider;
+  }
+
+  /**
+   * Decodes an HDFS delegation token to its identifier.
+   *
+   * @param token the token
+   * @return the decoded identifier.
+   * @throws IOException
+   */
+  public static DelegationTokenIdentifier decodeDelegationToken(
+      final Token<DelegationTokenIdentifier> token) throws IOException {
+    final DelegationTokenIdentifier id = new DelegationTokenIdentifier();
+    final ByteArrayInputStream buf =
+        new ByteArrayInputStream(token.getIdentifier());
+    try (DataInputStream in = new DataInputStream(buf)) {
+      id.readFields(in);
+    }
+    return id;
   }
 }

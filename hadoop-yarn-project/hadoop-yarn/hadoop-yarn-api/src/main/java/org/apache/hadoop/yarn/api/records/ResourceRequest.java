@@ -21,8 +21,10 @@ package org.apache.hadoop.yarn.api.records;
 import java.io.Serializable;
 
 import org.apache.hadoop.classification.InterfaceAudience.Public;
+import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.classification.InterfaceStability.Stable;
+import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.ApplicationMasterProtocol;
 import org.apache.hadoop.yarn.util.Records;
 
@@ -35,7 +37,7 @@ import org.apache.hadoop.yarn.util.Records;
  * <ul>
  *   <li>{@link Priority} of the request.</li>
  *   <li>
- *     The <em>name</em> of the machine or rack on which the allocation is
+ *     The <em>name</em> of the host or rack on which the allocation is
  *     desired. A special value of <em>*</em> signifies that
  *     <em>any</em> host/rack is acceptable to the application.
  *   </li>
@@ -63,15 +65,18 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
   @Stable
   public static ResourceRequest newInstance(Priority priority, String hostName,
       Resource capability, int numContainers) {
-    return newInstance(priority, hostName, capability, numContainers, true);
+    return ResourceRequest.newBuilder().priority(priority)
+        .resourceName(hostName).capability(capability)
+        .numContainers(numContainers).build();
   }
 
   @Public
   @Stable
   public static ResourceRequest newInstance(Priority priority, String hostName,
       Resource capability, int numContainers, boolean relaxLocality) {
-    return newInstance(priority, hostName, capability, numContainers,
-        relaxLocality, null);
+    return ResourceRequest.newBuilder().priority(priority)
+        .resourceName(hostName).capability(capability)
+        .numContainers(numContainers).relaxLocality(relaxLocality).build();
   }
   
   @Public
@@ -79,8 +84,10 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
   public static ResourceRequest newInstance(Priority priority, String hostName,
       Resource capability, int numContainers, boolean relaxLocality,
       String labelExpression) {
-    return newInstance(priority, hostName, capability, numContainers,
-        relaxLocality, labelExpression, ExecutionTypeRequest.newInstance());
+    return ResourceRequest.newBuilder().priority(priority)
+        .resourceName(hostName).capability(capability)
+        .numContainers(numContainers).relaxLocality(relaxLocality)
+        .nodeLabelExpression(labelExpression).build();
   }
 
   @Public
@@ -88,15 +95,189 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
   public static ResourceRequest newInstance(Priority priority, String hostName,
       Resource capability, int numContainers, boolean relaxLocality, String
       labelExpression, ExecutionTypeRequest executionTypeRequest) {
-    ResourceRequest request = Records.newRecord(ResourceRequest.class);
-    request.setPriority(priority);
-    request.setResourceName(hostName);
-    request.setCapability(capability);
-    request.setNumContainers(numContainers);
-    request.setRelaxLocality(relaxLocality);
-    request.setNodeLabelExpression(labelExpression);
-    request.setExecutionTypeRequest(executionTypeRequest);
-    return request;
+    return ResourceRequest.newBuilder().priority(priority)
+        .resourceName(hostName).capability(capability)
+        .numContainers(numContainers).relaxLocality(relaxLocality)
+        .nodeLabelExpression(labelExpression)
+        .executionTypeRequest(executionTypeRequest).profileCapability(null)
+        .build();
+  }
+
+  @Public
+  @Unstable
+  public static ResourceRequest newInstance(Priority priority, String hostName,
+      Resource capability, int numContainers, boolean relaxLocality,
+      String labelExpression, ExecutionTypeRequest executionTypeRequest,
+      ProfileCapability profile) {
+    return ResourceRequest.newBuilder().priority(priority)
+        .resourceName(hostName).capability(capability)
+        .numContainers(numContainers).relaxLocality(relaxLocality)
+        .nodeLabelExpression(labelExpression)
+        .executionTypeRequest(executionTypeRequest).profileCapability(profile)
+        .build();
+  }
+
+  @Public
+  @Unstable
+  public static ResourceRequestBuilder newBuilder() {
+    return new ResourceRequestBuilder();
+  }
+
+  /**
+   * Class to construct instances of {@link ResourceRequest} with specific
+   * options.
+   */
+  @Public
+  @Stable
+  public static final class ResourceRequestBuilder {
+    private ResourceRequest resourceRequest =
+        Records.newRecord(ResourceRequest.class);
+
+    private ResourceRequestBuilder() {
+      resourceRequest.setResourceName(ANY);
+      resourceRequest.setNumContainers(1);
+      resourceRequest.setPriority(Priority.newInstance(0));
+      resourceRequest.setRelaxLocality(true);
+      resourceRequest.setExecutionTypeRequest(
+          ExecutionTypeRequest.newInstance());
+      resourceRequest.setProfileCapability(null);
+    }
+
+    /**
+     * Set the <code>priority</code> of the request.
+     * @see ResourceRequest#setPriority(Priority)
+     * @param priority <code>priority</code> of the request
+     * @return {@link ResourceRequestBuilder}
+     */
+    @Public
+    @Stable
+    public ResourceRequestBuilder priority(Priority priority) {
+      resourceRequest.setPriority(priority);
+      return this;
+    }
+
+    /**
+     * Set the <code>resourceName</code> of the request.
+     * @see ResourceRequest#setResourceName(String)
+     * @param resourceName <code>resourceName</code> of the request
+     * @return {@link ResourceRequestBuilder}
+     */
+    @Public
+    @Stable
+    public ResourceRequestBuilder resourceName(String resourceName) {
+      resourceRequest.setResourceName(resourceName);
+      return this;
+    }
+
+    /**
+     * Set the <code>capability</code> of the request.
+     * @see ResourceRequest#setCapability(Resource)
+     * @param capability <code>capability</code> of the request
+     * @return {@link ResourceRequestBuilder}
+     */
+    @Public
+    @Stable
+    public ResourceRequestBuilder capability(Resource capability) {
+      resourceRequest.setCapability(capability);
+      return this;
+    }
+
+    /**
+     * Set the <code>numContainers</code> of the request.
+     * @see ResourceRequest#setNumContainers(int)
+     * @param numContainers <code>numContainers</code> of the request
+     * @return {@link ResourceRequestBuilder}
+     */
+    @Public
+    @Stable
+    public ResourceRequestBuilder numContainers(int numContainers) {
+      resourceRequest.setNumContainers(numContainers);
+      return this;
+    }
+
+    /**
+     * Set the <code>relaxLocality</code> of the request.
+     * @see ResourceRequest#setRelaxLocality(boolean)
+     * @param relaxLocality <code>relaxLocality</code> of the request
+     * @return {@link ResourceRequestBuilder}
+     */
+    @Public
+    @Stable
+    public ResourceRequestBuilder relaxLocality(boolean relaxLocality) {
+      resourceRequest.setRelaxLocality(relaxLocality);
+      return this;
+    }
+
+    /**
+     * Set the <code>nodeLabelExpression</code> of the request.
+     * @see ResourceRequest#setNodeLabelExpression(String)
+     * @param nodeLabelExpression
+     *          <code>nodeLabelExpression</code> of the request
+     * @return {@link ResourceRequestBuilder}
+     */
+    @Public
+    @Evolving
+    public ResourceRequestBuilder nodeLabelExpression(
+        String nodeLabelExpression) {
+      resourceRequest.setNodeLabelExpression(nodeLabelExpression);
+      return this;
+    }
+
+    /**
+     * Set the <code>executionTypeRequest</code> of the request.
+     * @see ResourceRequest#setExecutionTypeRequest(
+     * ExecutionTypeRequest)
+     * @param executionTypeRequest
+     *          <code>executionTypeRequest</code> of the request
+     * @return {@link ResourceRequestBuilder}
+     */
+    @Public
+    @Evolving
+    public ResourceRequestBuilder executionTypeRequest(
+        ExecutionTypeRequest executionTypeRequest) {
+      resourceRequest.setExecutionTypeRequest(executionTypeRequest);
+      return this;
+    }
+
+    /**
+     * Set the <code>allocationRequestId</code> of the request.
+     * @see ResourceRequest#setAllocationRequestId(long)
+     * @param allocationRequestId
+     *          <code>allocationRequestId</code> of the request
+     * @return {@link ResourceRequestBuilder}
+     */
+    @Public
+    @Evolving
+    public ResourceRequestBuilder allocationRequestId(
+        long allocationRequestId) {
+      resourceRequest.setAllocationRequestId(allocationRequestId);
+      return this;
+    }
+
+    /**
+     * Set the <code>resourceProfile</code> of the request.
+     * @see ResourceRequest#setProfileCapability(ProfileCapability)
+     * @param profileCapability
+     *          <code>profileCapability</code> of the request
+     * @return {@link ResourceRequestBuilder}
+     */
+    @Public
+    @InterfaceStability.Unstable
+    public ResourceRequestBuilder profileCapability(
+        ProfileCapability profileCapability) {
+      resourceRequest.setProfileCapability(profileCapability);
+      return this;
+    }
+
+    /**
+     * Return generated {@link ResourceRequest} object.
+     * @return {@link ResourceRequest}
+     */
+    @Public
+    @Stable
+    public ResourceRequest build() {
+      return resourceRequest;
+    }
   }
 
   @Public
@@ -112,9 +293,17 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
       // Compare priority, host and capability
       int ret = r1.getPriority().compareTo(r2.getPriority());
       if (ret == 0) {
+        ret = Long.compare(
+            r1.getAllocationRequestId(), r2.getAllocationRequestId());
+      }
+      if (ret == 0) {
         String h1 = r1.getResourceName();
         String h2 = r2.getResourceName();
         ret = h1.compareTo(h2);
+      }
+      if (ret == 0) {
+        ret = r1.getExecutionTypeRequest()
+            .compareTo(r2.getExecutionTypeRequest());
       }
       if (ret == 0) {
         ret = r1.getCapability().compareTo(r2.getCapability());
@@ -188,22 +377,6 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
   @Stable
   public abstract void setResourceName(String resourceName);
   
-  /**
-   * Get the <code>Resource</code> capability of the request.
-   * @return <code>Resource</code> capability of the request
-   */
-  @Public
-  @Stable
-  public abstract Resource getCapability();
-  
-  /**
-   * Set the <code>Resource</code> capability of the request
-   * @param capability <code>Resource</code> capability of the request
-   */
-  @Public
-  @Stable
-  public abstract void setCapability(Resource capability);
-
   /**
    * Get the number of containers required with the given specifications.
    * @return number of containers required with the given specifications
@@ -313,6 +486,14 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
   @Evolving
   public abstract void setNodeLabelExpression(String nodelabelExpression);
 
+  @Public
+  @InterfaceStability.Unstable
+  public abstract ProfileCapability getProfileCapability();
+
+  @Public
+  @InterfaceStability.Unstable
+  public abstract void setProfileCapability(ProfileCapability p);
+
   /**
    * Get the optional <em>ID</em> corresponding to this allocation request. This
    * ID is an identifier for different {@code ResourceRequest}s from the <b>same
@@ -364,6 +545,22 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
   public void setAllocationRequestId(long allocationRequestID) {
     throw new UnsupportedOperationException();
   }
+
+  /**
+   * Set the <code>Resource</code> capability of the request.
+   * @param capability <code>Resource</code> capability of the request
+   */
+  @Public
+  @Stable
+  public abstract void setCapability(Resource capability);
+
+  /**
+   * Get the <code>Resource</code> capability of the request.
+   * @return <code>Resource</code> capability of the request
+   */
+  @Public
+  @Stable
+  public abstract Resource getCapability();
   
   @Override
   public int hashCode() {
@@ -372,11 +569,14 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
     Resource capability = getCapability();
     String hostName = getResourceName();
     Priority priority = getPriority();
+    ProfileCapability profile = getProfileCapability();
     result =
         prime * result + ((capability == null) ? 0 : capability.hashCode());
     result = prime * result + ((hostName == null) ? 0 : hostName.hashCode());
     result = prime * result + getNumContainers();
     result = prime * result + ((priority == null) ? 0 : priority.hashCode());
+    result = prime * result + Long.valueOf(getAllocationRequestId()).hashCode();
+    result = prime * result + ((profile == null) ? 0 : profile.hashCode());
     return result;
   }
 
@@ -414,9 +614,15 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
       if (other.getExecutionTypeRequest() != null) {
         return false;
       }
-    } else if (!execTypeRequest.equals(other.getExecutionTypeRequest())) {
+    } else if (!execTypeRequest.getExecutionType()
+        .equals(other.getExecutionTypeRequest().getExecutionType())) {
       return false;
     }
+
+    if (getAllocationRequestId() != other.getAllocationRequestId()) {
+      return false;
+    }
+
     if (getNodeLabelExpression() == null) {
       if (other.getNodeLabelExpression() != null) {
         return false;
@@ -441,12 +647,25 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
       int hostNameComparison =
           this.getResourceName().compareTo(other.getResourceName());
       if (hostNameComparison == 0) {
-        int capabilityComparison =
-            this.getCapability().compareTo(other.getCapability());
-        if (capabilityComparison == 0) {
-          return this.getNumContainers() - other.getNumContainers();
+        int execTypeReqComparison = this.getExecutionTypeRequest()
+            .compareTo(other.getExecutionTypeRequest());
+        if (execTypeReqComparison == 0) {
+          int capabilityComparison =
+              this.getCapability().compareTo(other.getCapability());
+          if (capabilityComparison == 0) {
+            int numContainerComparison =
+                this.getNumContainers() - other.getNumContainers();
+            if (numContainerComparison == 0) {
+              return Long.compare(getAllocationRequestId(),
+                  other.getAllocationRequestId());
+            } else {
+              return numContainerComparison;
+            }
+          } else {
+            return capabilityComparison;
+          }
         } else {
-          return capabilityComparison;
+          return execTypeReqComparison;
         }
       } else {
         return hostNameComparison;

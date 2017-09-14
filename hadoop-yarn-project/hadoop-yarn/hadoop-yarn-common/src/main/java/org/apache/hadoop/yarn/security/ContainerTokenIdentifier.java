@@ -73,6 +73,31 @@ public class ContainerTokenIdentifier extends TokenIdentifier {
         CommonNodeLabelsManager.NO_LABEL, ContainerType.TASK);
   }
 
+  /**
+   * Creates a instance.
+   *
+   * @param appSubmitter appSubmitter
+   * @param containerID container ID
+   * @param creationTime creation time
+   * @param expiryTimeStamp expiry timestamp
+   * @param hostName hostname
+   * @param logAggregationContext log aggregation context
+   * @param masterKeyId master key ID
+   * @param priority priority
+   * @param r resource needed by the container
+   * @param rmIdentifier ResourceManager identifier
+   * @deprecated Use one of the other constructors instead.
+   */
+  @Deprecated
+  public ContainerTokenIdentifier(ContainerId containerID, String hostName,
+      String appSubmitter, Resource r, long expiryTimeStamp, int masterKeyId,
+      long rmIdentifier, Priority priority, long creationTime,
+      LogAggregationContext logAggregationContext) {
+    this(containerID, hostName, appSubmitter, r, expiryTimeStamp, masterKeyId,
+        rmIdentifier, priority, creationTime, logAggregationContext,
+        CommonNodeLabelsManager.NO_LABEL);
+  }
+
   public ContainerTokenIdentifier(ContainerId containerID, String hostName,
       String appSubmitter, Resource r, long expiryTimeStamp, int masterKeyId,
       long rmIdentifier, Priority priority, long creationTime,
@@ -87,14 +112,15 @@ public class ContainerTokenIdentifier extends TokenIdentifier {
       long rmIdentifier, Priority priority, long creationTime,
       LogAggregationContext logAggregationContext, String nodeLabelExpression,
       ContainerType containerType) {
-    this(containerID, hostName, appSubmitter, r, expiryTimeStamp, masterKeyId,
-        rmIdentifier, priority, creationTime, logAggregationContext,
-        nodeLabelExpression, containerType, ExecutionType.GUARANTEED);
+    this(containerID, 0, hostName, appSubmitter, r, expiryTimeStamp,
+        masterKeyId, rmIdentifier, priority, creationTime,
+        logAggregationContext, nodeLabelExpression, containerType,
+        ExecutionType.GUARANTEED);
   }
 
-  public ContainerTokenIdentifier(ContainerId containerID, String hostName,
-      String appSubmitter, Resource r, long expiryTimeStamp, int masterKeyId,
-      long rmIdentifier, Priority priority, long creationTime,
+  public ContainerTokenIdentifier(ContainerId containerID, int containerVersion,
+      String hostName, String appSubmitter, Resource r, long expiryTimeStamp,
+      int masterKeyId, long rmIdentifier, Priority priority, long creationTime,
       LogAggregationContext logAggregationContext, String nodeLabelExpression,
       ContainerType containerType, ExecutionType executionType) {
     ContainerTokenIdentifierProto.Builder builder =
@@ -102,10 +128,11 @@ public class ContainerTokenIdentifier extends TokenIdentifier {
     if (containerID != null) {
       builder.setContainerId(((ContainerIdPBImpl)containerID).getProto());
     }
+    builder.setVersion(containerVersion);
     builder.setNmHostAddr(hostName);
     builder.setAppSubmitter(appSubmitter);
     if (r != null) {
-      builder.setResource(((ResourcePBImpl)r).getProto());
+      builder.setResource(ProtoUtils.convertToProtoFormat(r));
     }
     builder.setExpiryTimeStamp(expiryTimeStamp);
     builder.setMasterKeyId(masterKeyId);
@@ -184,7 +211,7 @@ public class ContainerTokenIdentifier extends TokenIdentifier {
   }
 
   /**
-   * Get the ContainerType of container to allocate
+   * Get the ContainerType of container to allocate.
    * @return ContainerType
    */
   public ContainerType getContainerType(){
@@ -241,7 +268,18 @@ public class ContainerTokenIdentifier extends TokenIdentifier {
     return UserGroupInformation.createRemoteUser(
         containerId);
   }
-  
+
+  /**
+   * Get the Container version
+   * @return container version
+   */
+  public int getVersion() {
+    if (proto.hasVersion()) {
+      return proto.getVersion();
+    } else {
+      return 0;
+    }
+  }
   /**
    * Get the node-label-expression in the original ResourceRequest
    */

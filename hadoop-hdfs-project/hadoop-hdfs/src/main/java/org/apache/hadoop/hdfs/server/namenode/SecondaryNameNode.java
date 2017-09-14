@@ -228,7 +228,7 @@ public class SecondaryNameNode implements Runnable,
 
     // Create connection to the namenode.
     shouldRun = true;
-    nameNodeAddr = NameNode.getServiceAddress(conf, true);
+    nameNodeAddr = NameNode.getServiceAddress(conf);
 
     this.conf = conf;
     this.namenode = NameNodeProxies.createNonHAProxy(conf, nameNodeAddr, 
@@ -478,6 +478,16 @@ public class SecondaryNameNode implements Runnable,
         httpAddr, httpsAddr, "secondary", DFSConfigKeys.
             DFS_SECONDARY_NAMENODE_KERBEROS_INTERNAL_SPNEGO_PRINCIPAL_KEY,
         DFSConfigKeys.DFS_SECONDARY_NAMENODE_KEYTAB_FILE_KEY);
+
+    final boolean xFrameEnabled = conf.getBoolean(
+        DFSConfigKeys.DFS_XFRAME_OPTION_ENABLED,
+        DFSConfigKeys.DFS_XFRAME_OPTION_ENABLED_DEFAULT);
+
+    final String xFrameOptionValue = conf.getTrimmed(
+        DFSConfigKeys.DFS_XFRAME_OPTION_VALUE,
+        DFSConfigKeys.DFS_XFRAME_OPTION_VALUE_DEFAULT);
+
+    builder.configureXFrame(xFrameEnabled).setXFrameOption(xFrameOptionValue);
 
     infoServer = builder.build();
     infoServer.setAttribute("secondary.name.node", this);
@@ -904,7 +914,7 @@ public class SecondaryNameNode implements Runnable,
 
       @Override
       public void selectInputStreams(Collection<EditLogInputStream> streams,
-          long fromTxId, boolean inProgressOk) {
+          long fromTxId, boolean inProgressOk, boolean onlyDurableTxns) {
         Iterator<StorageDirectory> iter = storage.dirIterator();
         while (iter.hasNext()) {
           StorageDirectory dir = iter.next();
@@ -1064,7 +1074,7 @@ public class SecondaryNameNode implements Runnable,
 
   }
     
-  static void doMerge(
+  void doMerge(
       CheckpointSignature sig, RemoteEditLogManifest manifest,
       boolean loadImage, FSImage dstImage, FSNamesystem dstNamesystem)
       throws IOException {   
@@ -1093,8 +1103,8 @@ public class SecondaryNameNode implements Runnable,
     Checkpointer.rollForwardByApplyingLogs(manifest, dstImage, dstNamesystem);
     // The following has the side effect of purging old fsimages/edit logs.
     dstImage.saveFSImageInAllDirs(dstNamesystem, dstImage.getLastAppliedTxId());
-    if (!dstNamesystem.isRollingUpgrade()) {
-      dstStorage.writeAll();
+    if (!namenode.isRollingUpgrade()) {
+      dstImage.updateStorageVersion();
     }
   }
 }

@@ -87,7 +87,7 @@ public class HistoryFileManager extends AbstractService {
   private static final Log LOG = LogFactory.getLog(HistoryFileManager.class);
   private static final Log SUMMARY_LOG = LogFactory.getLog(JobSummary.class);
 
-  private static enum HistoryInfoState {
+  private enum HistoryInfoState {
     IN_INTERMEDIATE, IN_DONE, DELETED, MOVE_FAILED
   };
   
@@ -231,38 +231,36 @@ public class HistoryFileManager extends AbstractService {
         JobId firstMoveFailedKey = null;
         int moveFailedCount = 0;
 
-        while(cache.size() > maxSize && keys.hasNext()) {
+        while (cache.size() > maxSize && keys.hasNext()) {
           JobId key = keys.next();
           HistoryFileInfo firstValue = cache.get(key);
-          if(firstValue != null) {
-            synchronized(firstValue) {
-              if (firstValue.isMovePending()) {
-                if(firstValue.didMoveFail() &&
-                    firstValue.jobIndexInfo.getFinishTime() <= cutoff) {
-                  cache.remove(key);
-                  //Now lets try to delete it
-                  try {
-                    firstValue.delete();
-                  } catch (IOException e) {
-                    LOG.error("Error while trying to delete history files" +
-                    		" that could not be moved to done.", e);
-                  }
-                } else {
-                  if (firstValue.didMoveFail()) {
-                    if (moveFailedCount == 0) {
-                      firstMoveFailedKey = key;
-                    }
-                    moveFailedCount += 1;
-                  } else {
-                    if (inIntermediateCount == 0) {
-                      firstInIntermediateKey = key;
-                    }
-                    inIntermediateCount += 1;
-                  }
+          if (firstValue != null) {
+            if (firstValue.isMovePending()) {
+              if (firstValue.didMoveFail() &&
+                  firstValue.jobIndexInfo.getFinishTime() <= cutoff) {
+                cache.remove(key);
+                // Now lets try to delete it
+                try {
+                  firstValue.delete();
+                } catch (IOException e) {
+                  LOG.error("Error while trying to delete history files" +
+                      " that could not be moved to done.", e);
                 }
               } else {
-                cache.remove(key);
+                if (firstValue.didMoveFail()) {
+                  if (moveFailedCount == 0) {
+                    firstMoveFailedKey = key;
+                  }
+                  moveFailedCount += 1;
+                } else {
+                  if (inIntermediateCount == 0) {
+                    firstInIntermediateKey = key;
+                  }
+                  inIntermediateCount += 1;
+                }
               }
+            } else {
+              cache.remove(key);
             }
           }
         }
@@ -301,6 +299,10 @@ public class HistoryFileManager extends AbstractService {
 
     public boolean isFull() {
       return cache.size() >= maxSize;
+    }
+
+    public int size() {
+      return cache.size();
     }
   }
 
@@ -405,17 +407,12 @@ public class HistoryFileManager extends AbstractService {
         }
         JobId jobId = jobIndexInfo.getJobId();
 
-        List<Path> paths = new ArrayList<Path>(2);
         if (historyFile == null) {
           LOG.info("No file for job-history with " + jobId + " found in cache!");
-        } else {
-          paths.add(historyFile);
         }
 
         if (confFile == null) {
           LOG.info("No file for jobConf with " + jobId + " found in cache!");
-        } else {
-          paths.add(confFile);
         }
 
         if (summaryFile == null || !intermediateDoneDirFc.util().exists(
@@ -458,15 +455,23 @@ public class HistoryFileManager extends AbstractService {
 
     /**
      * Parse a job from the JobHistoryFile, if the underlying file is not going
-     * to be deleted.
+     * to be deleted and the number of tasks associated with the job is not
+     * greater than maxTasksForLoadedJob.
      * 
-     * @return the Job or null if the underlying file was deleted.
+     * @return null if the underlying job history file was deleted, or
+     *         an {@link UnparsedJob} object representing a partially parsed job
+     *           if the job tasks exceeds the configured maximum, or
+     *         a {@link CompletedJob} representing a fully parsed job.
      * @throws IOException
-     *           if there is an error trying to read the file.
+     *           if there is an error trying to read the file if parsed.
      */
     public synchronized Job loadJob() throws IOException {
-      return new CompletedJob(conf, jobIndexInfo.getJobId(), historyFile,
-          false, jobIndexInfo.getUser(), this, aclsMgr);
+      if(isOversized()) {
+        return new UnparsedJob(maxTasksForLoadedJob, jobIndexInfo, this);
+      } else {
+        return new CompletedJob(conf, jobIndexInfo.getJobId(), historyFile,
+            false, jobIndexInfo.getUser(), this, aclsMgr);
+      }
     }
 
     /**
@@ -504,6 +509,12 @@ public class HistoryFileManager extends AbstractService {
       jobConf.addResource(fc.open(confFile), confFile.toString());
       return jobConf;
     }
+
+    private boolean isOversized() {
+      final int totalTasks = jobIndexInfo.getNumReduces() +
+          jobIndexInfo.getNumMaps();
+      return (maxTasksForLoadedJob > 0) && (totalTasks > maxTasksForLoadedJob);
+    }
   }
 
   private SerialNumberIndex serialNumberIndex = null;
@@ -536,7 +547,12 @@ public class HistoryFileManager extends AbstractService {
   @VisibleForTesting
   protected ThreadPoolExecutor moveToDoneExecutor = null;
   private long maxHistoryAge = 0;
-  
+
+  /**
+   * The maximum number of tasks allowed for a job to be loaded.
+   */
+  private int maxTasksForLoadedJob = -1;
+
   public HistoryFileManager() {
     super(HistoryFileManager.class.getName());
   }
@@ -554,6 +570,10 @@ public class HistoryFileManager extends AbstractService {
         JHAdminConfig.MR_HISTORY_MAX_START_WAIT_TIME,
         JHAdminConfig.DEFAULT_MR_HISTORY_MAX_START_WAIT_TIME);
     createHistoryDirs(SystemClock.getInstance(), 10 * 1000, maxFSWaitTime);
+
+    maxTasksForLoadedJob = conf.getInt(
+        JHAdminConfig.MR_HS_LOADED_JOBS_TASKS_MAX,
+        JHAdminConfig.DEFAULT_MR_HS_LOADED_JOBS_TASKS_MAX);
 
     this.aclsMgr = new JobACLsManager(conf);
 
@@ -589,6 +609,9 @@ public class HistoryFileManager extends AbstractService {
     while (!done &&
         ((timeOutMillis == -1) || (clock.getTime() - start < timeOutMillis))) {
       done = tryCreatingHistoryDirs(counter++ % 3 == 0); // log every 3 attempts, 30sec
+      if (done) {
+        break;
+      }
       try {
         Thread.sleep(intervalCheckMillis);
       } catch (InterruptedException ex) {
@@ -737,15 +760,29 @@ public class HistoryFileManager extends AbstractService {
     List<FileStatus> timestampedDirList = findTimestampedDirectories();
     // Sort first just so insertion is in a consistent order
     Collections.sort(timestampedDirList);
+    LOG.info("Found " + timestampedDirList.size() + " directories to load");
     for (FileStatus fs : timestampedDirList) {
       // TODO Could verify the correct format for these directories.
       addDirectoryToSerialNumberIndex(fs.getPath());
     }
+    final double maxCacheSize = (double) jobListCache.maxSize;
+    int prevCacheSize = jobListCache.size();
     for (int i= timestampedDirList.size() - 1;
         i >= 0 && !jobListCache.isFull(); i--) {
       FileStatus fs = timestampedDirList.get(i); 
       addDirectoryToJobListCache(fs.getPath());
+
+      int currCacheSize = jobListCache.size();
+      if((currCacheSize - prevCacheSize)/maxCacheSize >= 0.05) {
+        LOG.info(currCacheSize * 100.0 / maxCacheSize +
+            "% of cache is loaded.");
+      }
+      prevCacheSize = currCacheSize;
     }
+    final double loadedPercent = maxCacheSize == 0.0 ?
+        100 : prevCacheSize * 100.0 / maxCacheSize;
+    LOG.info("Existing job initialization finished. " +
+        loadedPercent + "% of cache is occupied.");
   }
 
   private void removeDirectoryFromSerialNumberIndex(Path serialDirPath) {

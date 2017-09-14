@@ -25,6 +25,8 @@ import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.datanode.CachingStrategy;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.util.StripedBlockUtil;
+import org.apache.hadoop.io.ByteBufferPool;
+import org.apache.hadoop.io.ElasticByteBufferPool;
 import org.apache.hadoop.io.erasurecode.CodecUtil;
 import org.apache.hadoop.io.erasurecode.ErasureCoderOptions;
 import org.apache.hadoop.io.erasurecode.rawcoder.RawErasureDecoder;
@@ -39,6 +41,7 @@ import java.util.BitSet;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * StripedReconstructor reconstruct one or more missed striped block in the
@@ -102,6 +105,7 @@ abstract class StripedReconstructor {
   private final ErasureCodingPolicy ecPolicy;
   private RawErasureDecoder decoder;
   private final ExtendedBlock blockGroup;
+  private static final ByteBufferPool BUFFER_POOL = new ElasticByteBufferPool();
 
   // position in striped internal block
   private long positionInBlock;
@@ -110,6 +114,11 @@ abstract class StripedReconstructor {
   private final CachingStrategy cachingStrategy;
   private long maxTargetLength = 0L;
   private final BitSet liveBitSet;
+
+  // metrics
+  private AtomicLong bytesRead = new AtomicLong(0);
+  private AtomicLong bytesWritten = new AtomicLong(0);
+  private AtomicLong remoteBytesRead = new AtomicLong(0);
 
   StripedReconstructor(ErasureCodingWorker worker,
       StripedReconstructionInfo stripedReconInfo) {
@@ -124,10 +133,34 @@ abstract class StripedReconstructor {
     }
     blockGroup = stripedReconInfo.getBlockGroup();
     stripedReader = new StripedReader(this, datanode, conf, stripedReconInfo);
-
     cachingStrategy = CachingStrategy.newDefaultStrategy();
 
     positionInBlock = 0L;
+  }
+
+  public void incrBytesRead(boolean local, long delta) {
+    if (local) {
+      bytesRead.addAndGet(delta);
+    } else {
+      bytesRead.addAndGet(delta);
+      remoteBytesRead.addAndGet(delta);
+    }
+  }
+
+  public void incrBytesWritten(long delta) {
+    bytesWritten.addAndGet(delta);
+  }
+
+  public long getBytesRead() {
+    return bytesRead.get();
+  }
+
+  public long getRemoteBytesRead() {
+    return remoteBytesRead.get();
+  }
+
+  public long getBytesWritten() {
+    return bytesWritten.get();
   }
 
   /**
@@ -139,8 +172,16 @@ abstract class StripedReconstructor {
    */
   abstract void reconstruct() throws IOException;
 
+  boolean useDirectBuffer() {
+    return decoder.preferDirectBuffer();
+  }
+
   ByteBuffer allocateBuffer(int length) {
-    return ByteBuffer.allocate(length);
+    return BUFFER_POOL.getBuffer(useDirectBuffer(), length);
+  }
+
+  void freeBuffer(ByteBuffer buffer) {
+    BUFFER_POOL.putBuffer(buffer);
   }
 
   ExtendedBlock getBlock(int i) {
@@ -191,6 +232,13 @@ abstract class StripedReconstructor {
     return blockGroup;
   }
 
+  /**
+   * Get the xmits that _will_ be used for this reconstruction task.
+   */
+  int getXmits() {
+    return stripedReader.getXmits();
+  }
+
   BitSet getLiveBitSet() {
     return liveBitSet;
   }
@@ -209,6 +257,12 @@ abstract class StripedReconstructor {
 
   RawErasureDecoder getDecoder() {
     return decoder;
+  }
+
+  void cleanup() {
+    if (decoder != null) {
+      decoder.release();
+    }
   }
 
   StripedReader getStripedReader() {

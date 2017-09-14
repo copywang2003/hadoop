@@ -173,7 +173,9 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
         NfsConfigKeys.DFS_NFS_SERVER_PORT_KEY,
         NfsConfigKeys.DFS_NFS_SERVER_PORT_DEFAULT), Nfs3Constant.PROGRAM,
         Nfs3Constant.VERSION, Nfs3Constant.VERSION, registrationSocket,
-        allowInsecurePorts);
+        allowInsecurePorts, config.getInt(
+                NfsConfigKeys.NFS_UDP_CLIENT_PORTMAP_TIMEOUT_MILLIS_KEY,
+                NfsConfigKeys.NFS_UDP_CLIENT_PORTMAP_TIMEOUT_MILLIS_DEFAULT));
 
     this.config = config;
     config.set(FsPermission.UMASK_LABEL, "000");
@@ -814,7 +816,7 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
       attrs = Nfs3Utils.getFileAttr(dfsClient, Nfs3Utils.getFileIdPath(handle),
           iug);
       if (readCount < count) {
-        LOG.info("Partical read. Asked offset: " + offset + " count: " + count
+        LOG.info("Partial read. Asked offset: " + offset + " count: " + count
             + " and read back: " + readCount + " file size: "
             + attrs.getSize());
       }
@@ -1206,7 +1208,7 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
       if (fstat == null) {
         return new REMOVE3Response(Nfs3Status.NFS3ERR_NOENT, errWcc);
       }
-      if (fstat.isDir()) {
+      if (fstat.isDirectory()) {
         return new REMOVE3Response(Nfs3Status.NFS3ERR_ISDIR, errWcc);
       }
 
@@ -1287,7 +1289,7 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
       if (fstat == null) {
         return new RMDIR3Response(Nfs3Status.NFS3ERR_NOENT, errWcc);
       }
-      if (!fstat.isDir()) {
+      if (!fstat.isDirectory()) {
         return new RMDIR3Response(Nfs3Status.NFS3ERR_NOTDIR, errWcc);
       }
 
@@ -1563,7 +1565,7 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
         LOG.info("Can't get path for fileId: " + handle.getFileId());
         return new READDIR3Response(Nfs3Status.NFS3ERR_STALE);
       }
-      if (!dirStatus.isDir()) {
+      if (!dirStatus.isDirectory()) {
         LOG.error("Can't readdir for regular file, fileId: "
             + handle.getFileId());
         return new READDIR3Response(Nfs3Status.NFS3ERR_NOTDIR);
@@ -1730,7 +1732,7 @@ public class RpcProgramNfs3 extends RpcProgram implements Nfs3Interface {
         LOG.info("Can't get path for fileId: " + handle.getFileId());
         return new READDIRPLUS3Response(Nfs3Status.NFS3ERR_STALE);
       }
-      if (!dirStatus.isDir()) {
+      if (!dirStatus.isDirectory()) {
         LOG.error("Can't readdirplus for regular file, fileId: "
             + handle.getFileId());
         return new READDIRPLUS3Response(Nfs3Status.NFS3ERR_NOTDIR);

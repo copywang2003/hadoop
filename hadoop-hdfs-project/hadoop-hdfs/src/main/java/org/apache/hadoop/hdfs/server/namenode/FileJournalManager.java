@@ -333,10 +333,17 @@ public class FileJournalManager implements JournalManager {
     return ret;
   }
 
+  synchronized public void selectInputStreams(
+      Collection<EditLogInputStream> streams,
+      long fromTxnId, boolean inProgressOk) throws IOException {
+    selectInputStreams(streams, fromTxnId, inProgressOk, false);
+  }
+
   @Override
   synchronized public void selectInputStreams(
       Collection<EditLogInputStream> streams, long fromTxId,
-      boolean inProgressOk) throws IOException {
+      boolean inProgressOk, boolean onlyDurableTxns)
+      throws IOException {
     List<EditLogFile> elfs = matchEditLogs(sd.getCurrentDir());
     if (LOG.isDebugEnabled()) {
       LOG.debug(this + ": selecting input streams starting at " + fromTxId +
@@ -444,16 +451,28 @@ public class FileJournalManager implements JournalManager {
   }
   
   public EditLogFile getLogFile(long startTxId) throws IOException {
-    return getLogFile(sd.getCurrentDir(), startTxId);
+    return getLogFile(sd.getCurrentDir(), startTxId, true);
   }
-  
+
+  public EditLogFile getLogFile(long startTxId, boolean inProgressOk)
+      throws IOException {
+    return getLogFile(sd.getCurrentDir(), startTxId, inProgressOk);
+  }
+
   public static EditLogFile getLogFile(File dir, long startTxId)
       throws IOException {
+    return getLogFile(dir, startTxId, true);
+  }
+
+  public static EditLogFile getLogFile(File dir, long startTxId,
+      boolean inProgressOk) throws IOException {
     List<EditLogFile> files = matchEditLogs(dir);
     List<EditLogFile> ret = Lists.newLinkedList();
     for (EditLogFile elf : files) {
       if (elf.getFirstTxId() == startTxId) {
-        ret.add(elf);
+        if (inProgressOk || !elf.isInProgress()) {
+          ret.add(elf);
+        }
       }
     }
     

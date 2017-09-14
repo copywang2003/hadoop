@@ -166,15 +166,21 @@ public interface ClientDatanodeProtocol {
   long getBalancerBandwidth() throws IOException;
 
   /**
+   * Get volume report of datanode.
+   */
+  List<DatanodeVolumeInfo> getVolumeReport() throws IOException;
+
+  /**
    * Submit a disk balancer plan for execution.
    */
-  void submitDiskBalancerPlan(String planID, long planVersion, String plan,
-                              boolean skipDateCheck) throws IOException;
+  void submitDiskBalancerPlan(String planID, long planVersion, String planFile,
+                              String planData, boolean skipDateCheck)
+       throws IOException;
 
   /**
    * Cancel an executing plan.
    *
-   * @param planID - A SHA512 hash of the plan string.
+   * @param planID - A SHA-1 hash of the plan string.
    */
   void cancelDiskBalancePlan(String planID) throws IOException;
 

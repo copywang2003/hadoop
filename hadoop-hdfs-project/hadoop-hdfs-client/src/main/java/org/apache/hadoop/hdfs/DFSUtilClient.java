@@ -18,9 +18,9 @@
 package org.apache.hadoop.hdfs;
 
 import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
 import com.google.common.primitives.SignedBytes;
-import org.apache.commons.io.Charsets;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.crypto.key.KeyProvider;
 import org.apache.hadoop.fs.BlockLocation;
@@ -52,6 +52,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.net.NodeBase;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.KMSUtil;
 import org.apache.hadoop.util.StringUtils;
 import org.slf4j.Logger;
@@ -71,6 +72,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URI;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Collection;
 import java.util.Collections;
@@ -81,6 +83,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_DATA_TRANSFER_CLIENT_TCPNODELAY_DEFAULT;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_DATA_TRANSFER_CLIENT_TCPNODELAY_KEY;
@@ -91,11 +98,21 @@ public class DFSUtilClient {
   public static final byte[] EMPTY_BYTES = {};
   private static final Logger LOG = LoggerFactory.getLogger(
       DFSUtilClient.class);
+
+  // Using the charset canonical name for String/byte[] conversions is much
+  // more efficient due to use of cached encoders/decoders.
+  private static final String UTF8_CSN = StandardCharsets.UTF_8.name();
+
   /**
    * Converts a string to a byte array using UTF8 encoding.
    */
   public static byte[] string2Bytes(String str) {
-    return str.getBytes(Charsets.UTF_8);
+    try {
+      return str.getBytes(UTF8_CSN);
+    } catch (UnsupportedEncodingException e) {
+      // should never happen!
+      throw new IllegalArgumentException("UTF8 decoding is not supported", e);
+    }
   }
 
   /**
@@ -151,6 +168,19 @@ public class DFSUtilClient {
     assert !suffix.startsWith(".") :
       "suffix '" + suffix + "' should not already have '.' prepended.";
     return key + "." + suffix;
+  }
+
+  /**
+   * Returns list of InetSocketAddress corresponding to HA NN RPC addresses from
+   * the configuration.
+   *
+   * @param conf configuration
+   * @return list of InetSocketAddresses
+   */
+  public static Map<String, Map<String, InetSocketAddress>> getHaNnRpcAddresses(
+      Configuration conf) {
+    return DFSUtilClient.getAddresses(conf, null,
+      HdfsClientConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY);
   }
 
   /**
@@ -281,13 +311,13 @@ public class DFSUtilClient {
    * @param length The number of bytes to decode
    * @return The decoded string
    */
-  private static String bytes2String(byte[] bytes, int offset, int length) {
+  static String bytes2String(byte[] bytes, int offset, int length) {
     try {
-      return new String(bytes, offset, length, "UTF8");
-    } catch(UnsupportedEncodingException e) {
-      assert false : "UTF8 encoding is not supported ";
+      return new String(bytes, offset, length, UTF8_CSN);
+    } catch (UnsupportedEncodingException e) {
+      // should never happen!
+      throw new IllegalArgumentException("UTF8 encoding is not supported", e);
     }
-    return null;
   }
 
   /**
@@ -350,7 +380,7 @@ public class DFSUtilClient {
   static Map<String, InetSocketAddress> getAddressesForNameserviceId(
       Configuration conf, String nsId, String defaultValue, String... keys) {
     Collection<String> nnIds = getNameNodeIds(conf, nsId);
-    Map<String, InetSocketAddress> ret = Maps.newHashMap();
+    Map<String, InetSocketAddress> ret = Maps.newLinkedHashMap();
     for (String nnId : emptyAsSingletonNull(nnIds)) {
       String suffix = concatSuffixes(nsId, nnId);
       String address = getConfValue(defaultValue, suffix, conf, keys);
@@ -516,7 +546,7 @@ public class DFSUtilClient {
   }
 
   private static String keyProviderUriKeyName =
-      HdfsClientConfigKeys.DFS_ENCRYPTION_KEY_PROVIDER_URI;
+      CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_PROVIDER_PATH;
 
   /**
    * Set the key provider uri configuration key name for creating key providers.
@@ -606,16 +636,17 @@ public class DFSUtilClient {
   }
 
   /**
-   * Probe for HDFS Encryption being enabled; this uses the value of
-   * the option {@link HdfsClientConfigKeys#DFS_ENCRYPTION_KEY_PROVIDER_URI},
-   * returning true if that property contains a non-empty, non-whitespace
+   * Probe for HDFS Encryption being enabled; this uses the value of the option
+   * {@link CommonConfigurationKeysPublic#HADOOP_SECURITY_KEY_PROVIDER_PATH}
+   * , returning true if that property contains a non-empty, non-whitespace
    * string.
    * @param conf configuration to probe
    * @return true if encryption is considered enabled.
    */
   public static boolean isHDFSEncryptionEnabled(Configuration conf) {
-    return !conf.getTrimmed(
-        HdfsClientConfigKeys.DFS_ENCRYPTION_KEY_PROVIDER_URI, "").isEmpty();
+    return !(conf.getTrimmed(
+        CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_PROVIDER_PATH, "")
+        .isEmpty());
   }
 
   public static InetSocketAddress getNNAddress(String address) {
@@ -764,5 +795,69 @@ public class DFSUtilClient {
     return conf.getBoolean(
         DFS_DATA_TRANSFER_CLIENT_TCPNODELAY_KEY,
         DFS_DATA_TRANSFER_CLIENT_TCPNODELAY_DEFAULT);
+  }
+
+  /**
+   * Utility to create a {@link ThreadPoolExecutor}.
+   *
+   * @param corePoolSize - min threads in the pool, even if idle
+   * @param maxPoolSize - max threads in the pool
+   * @param keepAliveTimeSecs - max seconds beyond which excess idle threads
+   *        will be terminated
+   * @param threadNamePrefix - name prefix for the pool threads
+   * @param runRejectedExec - when true, rejected tasks from
+   *        ThreadPoolExecutor are run in the context of calling thread
+   * @return ThreadPoolExecutor
+   */
+  public static ThreadPoolExecutor getThreadPoolExecutor(int corePoolSize,
+      int maxPoolSize, long keepAliveTimeSecs, String threadNamePrefix,
+      boolean runRejectedExec) {
+    return getThreadPoolExecutor(corePoolSize, maxPoolSize, keepAliveTimeSecs,
+        new SynchronousQueue<>(), threadNamePrefix, runRejectedExec);
+}
+
+  /**
+   * Utility to create a {@link ThreadPoolExecutor}.
+   *
+   * @param corePoolSize - min threads in the pool, even if idle
+   * @param maxPoolSize - max threads in the pool
+   * @param keepAliveTimeSecs - max seconds beyond which excess idle threads
+   *        will be terminated
+   * @param queue - the queue to use for holding tasks before they are executed.
+   * @param threadNamePrefix - name prefix for the pool threads
+   * @param runRejectedExec - when true, rejected tasks from
+   *        ThreadPoolExecutor are run in the context of calling thread
+   * @return ThreadPoolExecutor
+   */
+  public static ThreadPoolExecutor getThreadPoolExecutor(int corePoolSize,
+      int maxPoolSize, long keepAliveTimeSecs, BlockingQueue<Runnable> queue,
+      String threadNamePrefix, boolean runRejectedExec) {
+    Preconditions.checkArgument(corePoolSize > 0);
+    ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(corePoolSize,
+        maxPoolSize, keepAliveTimeSecs, TimeUnit.SECONDS,
+        queue, new Daemon.DaemonFactory() {
+          private final AtomicInteger threadIndex = new AtomicInteger(0);
+
+          @Override
+          public Thread newThread(Runnable r) {
+            Thread t = super.newThread(r);
+            t.setName(threadNamePrefix + threadIndex.getAndIncrement());
+            return t;
+          }
+        });
+    if (runRejectedExec) {
+      threadPoolExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor
+          .CallerRunsPolicy() {
+        @Override
+        public void rejectedExecution(Runnable runnable,
+            ThreadPoolExecutor e) {
+          LOG.info(threadNamePrefix + " task is rejected by " +
+                  "ThreadPoolExecutor. Executing it in current thread.");
+          // will run in the current thread
+          super.rejectedExecution(runnable, e);
+        }
+      });
+    }
+    return threadPoolExecutor;
   }
 }

@@ -43,6 +43,8 @@ import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.yarn.api.ApplicationClientProtocol;
 import org.apache.hadoop.yarn.api.protocolrecords.FailApplicationAttemptRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetAllResourceProfilesRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetAllResourceTypeInfoRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptReportRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptReportResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetApplicationAttemptsRequest;
@@ -70,6 +72,7 @@ import org.apache.hadoop.yarn.api.protocolrecords.GetNewReservationResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.GetNodesToLabelsRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetQueueInfoRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.GetQueueUserAclsInfoRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.GetResourceProfileRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.KillApplicationRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.KillApplicationResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.MoveApplicationAcrossQueuesRequest;
@@ -84,6 +87,8 @@ import org.apache.hadoop.yarn.api.protocolrecords.ReservationUpdateResponse;
 import org.apache.hadoop.yarn.api.protocolrecords.SignalContainerRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.SubmitApplicationRequest;
 import org.apache.hadoop.yarn.api.protocolrecords.UpdateApplicationPriorityRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.UpdateApplicationTimeoutsRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.UpdateApplicationTimeoutsResponse;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptReport;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -99,6 +104,8 @@ import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
+import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceTypeInfo;
 import org.apache.hadoop.yarn.api.records.SignalContainerCommand;
 import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
@@ -134,12 +141,12 @@ public class YarnClientImpl extends YarnClient {
   private long asyncApiPollTimeoutMillis;
   protected AHSClient historyClient;
   private boolean historyServiceEnabled;
-  protected TimelineClient timelineClient;
+  protected volatile TimelineClient timelineClient;
   @VisibleForTesting
   Text timelineService;
   @VisibleForTesting
   String timelineDTRenewer;
-  protected boolean timelineServiceEnabled;
+  private boolean timelineV1ServiceEnabled;
   protected boolean timelineServiceBestEffort;
 
   private static final String ROOT = "root";
@@ -165,20 +172,28 @@ public class YarnClientImpl extends YarnClient {
         YarnConfiguration.DEFAULT_YARN_CLIENT_APPLICATION_CLIENT_PROTOCOL_POLL_INTERVAL_MS);
     }
 
-    if (conf.getBoolean(YarnConfiguration.APPLICATION_HISTORY_ENABLED,
-      YarnConfiguration.DEFAULT_APPLICATION_HISTORY_ENABLED)) {
+    float timelineServiceVersion =
+        conf.getFloat(YarnConfiguration.TIMELINE_SERVICE_VERSION,
+            YarnConfiguration.DEFAULT_TIMELINE_SERVICE_VERSION);
+    if (conf.getBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED,
+        YarnConfiguration.DEFAULT_TIMELINE_SERVICE_ENABLED)
+        && ((Float.compare(timelineServiceVersion, 1.0f) == 0)
+            || (Float.compare(timelineServiceVersion, 1.5f) == 0))) {
+      timelineV1ServiceEnabled = true;
+      timelineDTRenewer = getTimelineDelegationTokenRenewer(conf);
+      timelineService = TimelineUtils.buildTimelineTokenService(conf);
+    }
+
+    // The AHSClientService is enabled by default when we start the
+    // TimelineServer which means we are able to get history information
+    // for applications/applicationAttempts/containers by using ahsClient
+    // when the TimelineServer is running.
+    if (timelineV1ServiceEnabled || conf.getBoolean(
+        YarnConfiguration.APPLICATION_HISTORY_ENABLED,
+        YarnConfiguration.DEFAULT_APPLICATION_HISTORY_ENABLED)) {
       historyServiceEnabled = true;
       historyClient = AHSClient.createAHSClient();
       historyClient.init(conf);
-    }
-
-    if (conf.getBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED,
-        YarnConfiguration.DEFAULT_TIMELINE_SERVICE_ENABLED)) {
-      timelineServiceEnabled = true;
-      timelineClient = createTimelineClient();
-      timelineClient.init(conf);
-      timelineDTRenewer = getTimelineDelegationTokenRenewer(conf);
-      timelineService = TimelineUtils.buildTimelineTokenService(conf);
     }
 
     timelineServiceBestEffort = conf.getBoolean(
@@ -199,9 +214,6 @@ public class YarnClientImpl extends YarnClient {
       if (historyServiceEnabled) {
         historyClient.start();
       }
-      if (timelineServiceEnabled) {
-        timelineClient.start();
-      }
     } catch (IOException e) {
       throw new YarnRuntimeException(e);
     }
@@ -216,7 +228,7 @@ public class YarnClientImpl extends YarnClient {
     if (historyServiceEnabled) {
       historyClient.stop();
     }
-    if (timelineServiceEnabled) {
+    if (timelineClient != null) {
       timelineClient.stop();
     }
     super.serviceStop();
@@ -255,7 +267,7 @@ public class YarnClientImpl extends YarnClient {
 
     // Automatically add the timeline DT into the CLC
     // Only when the security and the timeline service are both enabled
-    if (isSecurityEnabled() && timelineServiceEnabled) {
+    if (isSecurityEnabled() && timelineV1ServiceEnabled) {
       addTimelineDelegationToken(appContext.getAMContainerSpec());
     }
 
@@ -301,9 +313,10 @@ public class YarnClientImpl extends YarnClient {
         try {
           Thread.sleep(submitPollIntervalMillis);
         } catch (InterruptedException ie) {
-          LOG.error("Interrupted while waiting for application "
-              + applicationId
-              + " to be successfully submitted.");
+          String msg = "Interrupted while waiting for application "
+              + applicationId + " to be successfully submitted.";
+          LOG.error(msg);
+          throw new YarnException(msg, ie);
         }
       } catch (ApplicationNotFoundException ex) {
         // FailOver or RM restart happens before RMStateStore saves
@@ -342,7 +355,7 @@ public class YarnClientImpl extends YarnClient {
     }
     credentials.addToken(timelineService, timelineDelegationToken);
     if (LOG.isDebugEnabled()) {
-      LOG.debug("Add timline delegation token into credentials: "
+      LOG.debug("Add timeline delegation token into credentials: "
           + timelineDelegationToken);
     }
     DataOutputBuffer dob = new DataOutputBuffer();
@@ -354,16 +367,40 @@ public class YarnClientImpl extends YarnClient {
   @VisibleForTesting
   org.apache.hadoop.security.token.Token<TimelineDelegationTokenIdentifier>
       getTimelineDelegationToken() throws IOException, YarnException {
-        try {
-          return timelineClient.getDelegationToken(timelineDTRenewer);
-        } catch (Exception e ) {
-          if (timelineServiceBestEffort) {
-            LOG.warn("Failed to get delegation token from the timeline server: "
-                + e.getMessage());
-            return null;
+    try {
+      // Only reachable when both security and timeline service are enabled.
+      if (timelineClient == null) {
+        synchronized (this) {
+          if (timelineClient == null) {
+            TimelineClient tlClient = createTimelineClient();
+            tlClient.init(getConfig());
+            tlClient.start();
+            // Assign value to timeline client variable only
+            // when it is fully initiated. In order to avoid
+            // other threads to see partially initialized object.
+            this.timelineClient = tlClient;
           }
-          throw e;
         }
+      }
+      return timelineClient.getDelegationToken(timelineDTRenewer);
+    } catch (Exception e) {
+      if (timelineServiceBestEffort) {
+        LOG.warn("Failed to get delegation token from the timeline server: "
+            + e.getMessage());
+        return null;
+      }
+      throw e;
+    } catch (NoClassDefFoundError e) {
+      NoClassDefFoundError wrappedError = new NoClassDefFoundError(
+          e.getMessage() + ". It appears that the timeline client "
+              + "failed to initiate because an incompatible dependency "
+              + "in classpath. If timeline service is optional to this "
+              + "client, try to work around by setting "
+              + YarnConfiguration.TIMELINE_SERVICE_ENABLED
+              + " to false in client configuration.");
+      wrappedError.setStackTrace(e.getStackTrace());
+      throw wrappedError;
+    }
   }
 
   private static String getTimelineDelegationTokenRenewer(Configuration conf)
@@ -400,9 +437,20 @@ public class YarnClientImpl extends YarnClient {
   @Override
   public void killApplication(ApplicationId applicationId)
       throws YarnException, IOException {
+    killApplication(applicationId, null);
+  }
+
+  @Override
+  public void killApplication(ApplicationId applicationId, String diagnostics)
+      throws YarnException, IOException {
+
     KillApplicationRequest request =
         Records.newRecord(KillApplicationRequest.class);
     request.setApplicationId(applicationId);
+
+    if (diagnostics != null) {
+      request.setDiagnostics(diagnostics);
+    }
 
     try {
       int pollCount = 0;
@@ -417,20 +465,23 @@ public class YarnClientImpl extends YarnClient {
         }
 
         long elapsedMillis = System.currentTimeMillis() - startTime;
-        if (enforceAsyncAPITimeout() &&
-            elapsedMillis >= this.asyncApiPollTimeoutMillis) {
-          throw new YarnException("Timed out while waiting for application " +
-            applicationId + " to be killed.");
+        if (enforceAsyncAPITimeout()
+            && elapsedMillis >= this.asyncApiPollTimeoutMillis) {
+          throw new YarnException("Timed out while waiting for application "
+              + applicationId + " to be killed.");
         }
 
         if (++pollCount % 10 == 0) {
-          LOG.info("Waiting for application " + applicationId + " to be killed.");
+          LOG.info(
+              "Waiting for application " + applicationId + " to be killed.");
         }
         Thread.sleep(asyncApiPollIntervalMillis);
       }
     } catch (InterruptedException e) {
-      LOG.error("Interrupted while waiting for application " + applicationId
-          + " to be killed.");
+      String msg = "Interrupted while waiting for application "
+          + applicationId + " to be killed.";
+      LOG.error(msg);
+      throw new YarnException(msg, e);
     }
   }
 
@@ -500,6 +551,17 @@ public class YarnClientImpl extends YarnClient {
   }
 
   @Override
+  public List<ApplicationReport> getApplications(Set<String> applicationTypes,
+      EnumSet<YarnApplicationState> applicationStates,
+      Set<String> applicationTags) throws YarnException, IOException {
+    GetApplicationsRequest request =
+        GetApplicationsRequest.newInstance(applicationTypes, applicationStates);
+    request.setApplicationTags(applicationTags);
+    GetApplicationsResponse response = rmClient.getApplications(request);
+    return response.getApplicationList();
+  }
+
+  @Override
   public List<ApplicationReport> getApplications(Set<String> queues,
       Set<String> users, Set<String> applicationTypes,
       EnumSet<YarnApplicationState> applicationStates) throws YarnException,
@@ -508,6 +570,13 @@ public class YarnClientImpl extends YarnClient {
         GetApplicationsRequest.newInstance(applicationTypes, applicationStates);
     request.setQueues(queues);
     request.setUsers(users);
+    GetApplicationsResponse response = rmClient.getApplications(request);
+    return response.getApplicationList();
+  }
+
+  @Override
+  public List<ApplicationReport> getApplications(
+      GetApplicationsRequest request) throws YarnException, IOException {
     GetApplicationsResponse response = rmClient.getApplications(request);
     return response.getApplicationList();
   }
@@ -823,21 +892,21 @@ public class YarnClientImpl extends YarnClient {
   }
 
   @Override
-  public Map<NodeId, Set<NodeLabel>> getNodeToLabels() throws YarnException,
+  public Map<NodeId, Set<String>> getNodeToLabels() throws YarnException,
       IOException {
     return rmClient.getNodeToLabels(GetNodesToLabelsRequest.newInstance())
         .getNodeToLabels();
   }
 
   @Override
-  public Map<NodeLabel, Set<NodeId>> getLabelsToNodes() throws YarnException,
+  public Map<String, Set<NodeId>> getLabelsToNodes() throws YarnException,
       IOException {
     return rmClient.getLabelsToNodes(GetLabelsToNodesRequest.newInstance())
         .getLabelsToNodes();
   }
 
   @Override
-  public Map<NodeLabel, Set<NodeId>> getLabelsToNodes(Set<String> labels)
+  public Map<String, Set<NodeId>> getLabelsToNodes(Set<String> labels)
       throws YarnException, IOException {
     return rmClient.getLabelsToNodes(
         GetLabelsToNodesRequest.newInstance(labels)).getLabelsToNodes();
@@ -846,7 +915,7 @@ public class YarnClientImpl extends YarnClient {
   @Override
   public List<NodeLabel> getClusterNodeLabels() throws YarnException, IOException {
     return rmClient.getClusterNodeLabels(
-        GetClusterNodeLabelsRequest.newInstance()).getNodeLabels();
+        GetClusterNodeLabelsRequest.newInstance()).getNodeLabelList();
   }
 
   @Override
@@ -865,5 +934,36 @@ public class YarnClientImpl extends YarnClient {
     SignalContainerRequest request =
         SignalContainerRequest.newInstance(containerId, command);
     rmClient.signalToContainer(request);
+  }
+
+  @Override
+  public UpdateApplicationTimeoutsResponse updateApplicationTimeouts(
+      UpdateApplicationTimeoutsRequest request)
+      throws YarnException, IOException {
+    return rmClient.updateApplicationTimeouts(request);
+  }
+
+  @Override
+  public Map<String, Resource> getResourceProfiles()
+      throws YarnException, IOException {
+    GetAllResourceProfilesRequest request =
+        GetAllResourceProfilesRequest.newInstance();
+    return rmClient.getResourceProfiles(request).getResourceProfiles();
+  }
+
+  @Override
+  public Resource getResourceProfile(String profile)
+      throws YarnException, IOException {
+    GetResourceProfileRequest request = GetResourceProfileRequest
+        .newInstance(profile);
+    return rmClient.getResourceProfile(request).getResource();
+  }
+
+  @Override
+  public List<ResourceTypeInfo> getResourceTypeInfo()
+      throws YarnException, IOException {
+    GetAllResourceTypeInfoRequest request =
+        GetAllResourceTypeInfoRequest.newInstance();
+    return rmClient.getResourceTypeInfo(request).getResourceTypeInfo();
   }
 }

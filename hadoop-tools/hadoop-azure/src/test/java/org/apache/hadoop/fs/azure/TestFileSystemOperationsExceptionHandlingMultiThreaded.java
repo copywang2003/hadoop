@@ -29,8 +29,8 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.junit.After;
 import org.junit.Test;
 
-public class TestFileSystemOperationsExceptionHandlingMultiThreaded extends
-  NativeAzureFileSystemBaseTest {
+public class TestFileSystemOperationsExceptionHandlingMultiThreaded
+    extends AbstractWasbTestBase {
 
   FSDataInputStream inputStream = null;
 
@@ -91,6 +91,7 @@ public class TestFileSystemOperationsExceptionHandlingMultiThreaded extends
     renameThread.join();
 
     inputStream.seek(5);
+    inputStream.read();
   }
 
   @Test(expected=FileNotFoundException.class)

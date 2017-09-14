@@ -37,7 +37,7 @@ import org.apache.hadoop.yarn.api.records.Resource;
 public class RMAuditLogger {
   private static final Log LOG = LogFactory.getLog(RMAuditLogger.class);
 
-  static enum Keys {USER, OPERATION, TARGET, RESULT, IP, PERMISSIONS,
+  enum Keys {USER, OPERATION, TARGET, RESULT, IP, PERMISSIONS,
                     DESCRIPTION, APPID, APPATTEMPTID, CONTAINERID, 
                     CALLERCONTEXT, CALLERSIGNATURE, RESOURCE}
 
@@ -51,6 +51,14 @@ public class RMAuditLogger {
     public static final String KILL_APP_REQUEST = "Kill Application Request";
     public static final String SUBMIT_APP_REQUEST = "Submit Application Request";
     public static final String MOVE_APP_REQUEST = "Move Application Request";
+    public static final String GET_APP_STATE = "Get Application State";
+    public static final String GET_APP_PRIORITY = "Get Application Priority";
+    public static final String GET_APP_QUEUE = "Get Application Queue";
+    public static final String GET_APP_ATTEMPTS = "Get Application Attempts";
+    public static final String GET_APP_ATTEMPT_REPORT
+        = "Get Application Attempt Report";
+    public static final String GET_CONTAINERS = "Get Containers";
+    public static final String GET_CONTAINER_REPORT = "Get Container Report";
     public static final String FINISH_SUCCESS_APP = "Application Finished - Succeeded";
     public static final String FINISH_FAILED_APP = "Application Finished - Failed";
     public static final String FINISH_KILLED_APP = "Application Finished - Killed";
@@ -60,7 +68,10 @@ public class RMAuditLogger {
     public static final String ALLOC_CONTAINER = "AM Allocated Container";
     public static final String RELEASE_CONTAINER = "AM Released Container";
     public static final String UPDATE_APP_PRIORITY =
-        "Update Application Priority Request";
+        "Update Application Priority";
+    public static final String UPDATE_APP_TIMEOUTS =
+        "Update Application Timeouts";
+    public static final String GET_APP_TIMEOUTS = "Get Application Timeouts";
     public static final String CHANGE_CONTAINER_RESOURCE =
         "AM Changed Container Resource";
     public static final String SIGNAL_CONTAINER = "Signal Container Request";
@@ -77,12 +88,12 @@ public class RMAuditLogger {
     public static final String LIST_RESERVATION_REQUEST = "List " +
             "Reservation Request";
   }
-  
+
   static String createSuccessLog(String user, String operation, String target,
       ApplicationId appId, ApplicationAttemptId attemptId,
       ContainerId containerId, Resource resource) {
     return createSuccessLog(user, operation, target, appId, attemptId,
-        containerId, resource, null);
+        containerId, resource, null, Server.getRemoteIp());
   }
 
   /**
@@ -90,10 +101,13 @@ public class RMAuditLogger {
    */
   static String createSuccessLog(String user, String operation, String target,
       ApplicationId appId, ApplicationAttemptId attemptId,
-      ContainerId containerId, Resource resource, CallerContext callerContext) {
+      ContainerId containerId, Resource resource, CallerContext callerContext,
+      InetAddress ip) {
     StringBuilder b = new StringBuilder();
     start(Keys.USER, user, b);
-    addRemoteIP(b);
+    if (ip != null) {
+      add(Keys.IP, ip.getHostAddress(), b);
+    }
     add(Keys.OPERATION, operation, b);
     add(Keys.TARGET, target ,b);
     add(Keys.RESULT, AuditConstants.SUCCESS, b);
@@ -183,10 +197,37 @@ public class RMAuditLogger {
       ApplicationId appId, CallerContext callerContext) {
     if (LOG.isInfoEnabled()) {
       LOG.info(createSuccessLog(user, operation, target, appId, null, null,
-          null, callerContext));
+          null, callerContext, Server.getRemoteIp()));
     }
   }
 
+  /**
+   * Create a readable and parseable audit log string for a successful event.
+   *
+   * @param user
+   *          User who made the service request to the ResourceManager.
+   * @param operation
+   *          Operation requested by the user.
+   * @param target
+   *          The target on which the operation is being performed.
+   * @param appId
+   *          Application Id in which operation was performed.
+   * @param ip
+   *          The ip address of the caller.
+   *
+   *          <br>
+   *          <br>
+   *          Note that the {@link RMAuditLogger} uses tabs ('\t') as a key-val
+   *          delimiter and hence the value fields should not contains tabs
+   *          ('\t').
+   */
+  public static void logSuccess(String user, String operation, String target,
+      ApplicationId appId, InetAddress ip) {
+    if (LOG.isInfoEnabled()) {
+      LOG.info(createSuccessLog(user, operation, target, appId, null, null,
+          null, null, ip));
+    }
+  }
 
   /**
    * Create a readable and parseable audit log string for a successful event.

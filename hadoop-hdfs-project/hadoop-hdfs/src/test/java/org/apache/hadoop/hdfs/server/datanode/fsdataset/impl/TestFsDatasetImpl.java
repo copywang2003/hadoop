@@ -38,6 +38,7 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.Storage;
+import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.BlockScanner;
 import org.apache.hadoop.hdfs.server.datanode.DNConf;
@@ -50,12 +51,11 @@ import org.apache.hadoop.hdfs.server.datanode.ReplicaInfo;
 import org.apache.hadoop.hdfs.server.datanode.ShortCircuitRegistry;
 import org.apache.hadoop.hdfs.server.datanode.StorageLocation;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeReference;
-import org.apache.hadoop.hdfs.server.datanode.fsdataset.RoundRobinVolumeChoosingPolicy;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi.FsVolumeReferences;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.io.MultipleIOException;
 import org.apache.hadoop.test.GenericTestUtils;
-import org.apache.hadoop.util.DiskChecker;
 import org.apache.hadoop.util.FakeTimer;
 import org.apache.hadoop.util.StringUtils;
 import org.junit.Assert;
@@ -63,8 +63,6 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Matchers;
 import org.mockito.Mockito;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -73,16 +71,18 @@ import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DN_CACHED_DFSUSED_CHECK_INTERVAL_MS;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_SCAN_PERIOD_HOURS_KEY;
+import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -91,13 +91,10 @@ import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyListOf;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.slf4j.Logger;
@@ -122,8 +119,10 @@ public class TestFsDatasetImpl {
   
   private final static String BLOCKPOOL = "BP-TEST";
 
-  private static Storage.StorageDirectory createStorageDirectory(File root) {
-    Storage.StorageDirectory sd = new Storage.StorageDirectory(root);
+  private static Storage.StorageDirectory createStorageDirectory(File root)
+      throws SecurityException, IOException {
+    Storage.StorageDirectory sd = new Storage.StorageDirectory(
+        StorageLocation.parse(root.toURI().toString()));
     DataStorage.createStorageID(sd, false);
     return sd;
   }
@@ -163,11 +162,11 @@ public class TestFsDatasetImpl {
     storage = mock(DataStorage.class);
     this.conf = new Configuration();
     this.conf.setLong(DFS_DATANODE_SCAN_PERIOD_HOURS_KEY, 0);
-    final DNConf dnConf = new DNConf(conf);
 
     when(datanode.getConf()).thenReturn(conf);
+    final DNConf dnConf = new DNConf(datanode);
     when(datanode.getDnConf()).thenReturn(dnConf);
-    final BlockScanner disabledBlockScanner = new BlockScanner(datanode, conf);
+    final BlockScanner disabledBlockScanner = new BlockScanner(datanode);
     when(datanode.getBlockScanner()).thenReturn(disabledBlockScanner);
     final ShortCircuitRegistry shortCircuitRegistry =
         new ShortCircuitRegistry(conf);
@@ -196,16 +195,18 @@ public class TestFsDatasetImpl {
     for (int i = 0; i < numNewVolumes; i++) {
       String path = BASE_DIR + "/newData" + i;
       String pathUri = new Path(path).toUri().toString();
-      expectedVolumes.add(new File(pathUri).toString());
+      expectedVolumes.add(new File(pathUri).getAbsolutePath());
       StorageLocation loc = StorageLocation.parse(pathUri);
       Storage.StorageDirectory sd = createStorageDirectory(new File(path));
       DataStorage.VolumeBuilder builder =
           new DataStorage.VolumeBuilder(storage, sd);
-      when(storage.prepareVolume(eq(datanode), eq(loc.getFile()),
+      when(storage.prepareVolume(eq(datanode), eq(loc),
           anyListOf(NamespaceInfo.class)))
           .thenReturn(builder);
 
       dataset.addVolume(loc, nsInfos);
+      LOG.info("expectedVolumes " + i + " is " +
+          new File(pathUri).getAbsolutePath());
     }
 
     assertEquals(totalVolumes, getNumVolumes());
@@ -215,7 +216,9 @@ public class TestFsDatasetImpl {
     try (FsDatasetSpi.FsVolumeReferences volumes =
         dataset.getFsVolumeReferences()) {
       for (int i = 0; i < numNewVolumes; i++) {
-        actualVolumes.add(volumes.get(numExistingVolumes + i).getBasePath());
+        String volumeName = volumes.get(numExistingVolumes + i).toString();
+        actualVolumes.add(volumeName);
+        LOG.info("actualVolume " + i + " is " + volumeName);
       }
     }
     assertEquals(actualVolumes.size(), expectedVolumes.size());
@@ -256,15 +259,24 @@ public class TestFsDatasetImpl {
       String bpid = BLOCK_POOL_IDS[NUM_BLOCKS % BLOCK_POOL_IDS.length];
       ExtendedBlock eb = new ExtendedBlock(bpid, i);
       try (ReplicaHandler replica =
-          dataset.createRbw(StorageType.DEFAULT, eb, false)) {
+          dataset.createRbw(StorageType.DEFAULT, null, eb, false)) {
       }
     }
     final String[] dataDirs =
         conf.get(DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY).split(",");
     final String volumePathToRemove = dataDirs[0];
-    Set<File> volumesToRemove = new HashSet<>();
-    volumesToRemove.add(StorageLocation.parse(volumePathToRemove).getFile());
+    Set<StorageLocation> volumesToRemove = new HashSet<>();
+    volumesToRemove.add(StorageLocation.parse(volumePathToRemove));
 
+    FsVolumeReferences volReferences = dataset.getFsVolumeReferences();
+    FsVolumeImpl volumeToRemove = null;
+    for (FsVolumeSpi vol: volReferences) {
+      if (vol.getStorageLocation().equals(volumesToRemove.iterator().next())) {
+        volumeToRemove = (FsVolumeImpl) vol;
+      }
+    }
+    assertTrue(volumeToRemove != null);
+    volReferences.close();
     dataset.removeVolumes(volumesToRemove, true);
     int expectedNumVolumes = dataDirs.length - 1;
     assertEquals("The volume has been removed from the volumeList.",
@@ -273,7 +285,7 @@ public class TestFsDatasetImpl {
         expectedNumVolumes, dataset.storageMap.size());
 
     try {
-      dataset.asyncDiskService.execute(volumesToRemove.iterator().next(),
+      dataset.asyncDiskService.execute(volumeToRemove,
           new Runnable() {
             @Override
             public void run() {}
@@ -281,7 +293,7 @@ public class TestFsDatasetImpl {
       fail("Expect RuntimeException: the volume has been removed from the "
            + "AsyncDiskService.");
     } catch (RuntimeException e) {
-      GenericTestUtils.assertExceptionContains("Cannot find root", e);
+      GenericTestUtils.assertExceptionContains("Cannot find volume", e);
     }
 
     int totalNumReplicas = 0;
@@ -306,7 +318,7 @@ public class TestFsDatasetImpl {
     Storage.StorageDirectory sd = createStorageDirectory(new File(newVolumePath));
     DataStorage.VolumeBuilder builder =
         new DataStorage.VolumeBuilder(storage, sd);
-    when(storage.prepareVolume(eq(datanode), eq(loc.getFile()),
+    when(storage.prepareVolume(eq(datanode), eq(loc),
         anyListOf(NamespaceInfo.class)))
         .thenReturn(builder);
 
@@ -315,68 +327,10 @@ public class TestFsDatasetImpl {
 
     when(storage.getNumStorageDirs()).thenReturn(numExistingVolumes + 1);
     when(storage.getStorageDir(numExistingVolumes)).thenReturn(sd);
-    Set<File> volumesToRemove = new HashSet<>();
-    volumesToRemove.add(loc.getFile());
+    Set<StorageLocation> volumesToRemove = new HashSet<>();
+    volumesToRemove.add(loc);
     dataset.removeVolumes(volumesToRemove, true);
     assertEquals(numExistingVolumes, getNumVolumes());
-  }
-
-  @Test(timeout = 5000)
-  public void testChangeVolumeWithRunningCheckDirs() throws IOException {
-    RoundRobinVolumeChoosingPolicy<FsVolumeImpl> blockChooser =
-        new RoundRobinVolumeChoosingPolicy<>();
-    conf.setLong(DFSConfigKeys.DFS_DATANODE_SCAN_PERIOD_HOURS_KEY, -1);
-    final BlockScanner blockScanner = new BlockScanner(datanode, conf);
-    final FsVolumeList volumeList = new FsVolumeList(
-        Collections.<VolumeFailureInfo>emptyList(), blockScanner, blockChooser);
-    final List<FsVolumeImpl> oldVolumes = new ArrayList<>();
-
-    // Initialize FsVolumeList with 5 mock volumes.
-    final int NUM_VOLUMES = 5;
-    for (int i = 0; i < NUM_VOLUMES; i++) {
-      FsVolumeImpl volume = mock(FsVolumeImpl.class);
-      oldVolumes.add(volume);
-      when(volume.getBasePath()).thenReturn("data" + i);
-      when(volume.checkClosed()).thenReturn(true);
-      FsVolumeReference ref = mock(FsVolumeReference.class);
-      when(ref.getVolume()).thenReturn(volume);
-      volumeList.addVolume(ref);
-    }
-
-    // When call checkDirs() on the 2nd volume, anther "thread" removes the 5th
-    // volume and add another volume. It does not affect checkDirs() running.
-    final FsVolumeImpl newVolume = mock(FsVolumeImpl.class);
-    final FsVolumeReference newRef = mock(FsVolumeReference.class);
-    when(newRef.getVolume()).thenReturn(newVolume);
-    when(newVolume.getBasePath()).thenReturn("data4");
-    FsVolumeImpl blockedVolume = volumeList.getVolumes().get(1);
-    doAnswer(new Answer() {
-      @Override
-      public Object answer(InvocationOnMock invocationOnMock)
-          throws Throwable {
-        volumeList.removeVolume(new File("data4"), false);
-        volumeList.addVolume(newRef);
-        return null;
-      }
-    }).when(blockedVolume).checkDirs();
-
-    FsVolumeImpl brokenVolume = volumeList.getVolumes().get(2);
-    doThrow(new DiskChecker.DiskErrorException("broken"))
-        .when(brokenVolume).checkDirs();
-
-    volumeList.checkDirs();
-
-    // Since FsVolumeImpl#checkDirs() get a snapshot of the list of volumes
-    // before running removeVolume(), it is supposed to run checkDirs() on all
-    // the old volumes.
-    for (FsVolumeImpl volume : oldVolumes) {
-      verify(volume).checkDirs();
-    }
-    // New volume is not visible to checkDirs() process.
-    verify(newVolume, never()).checkDirs();
-    assertTrue(volumeList.getVolumes().contains(newVolume));
-    assertFalse(volumeList.getVolumes().contains(brokenVolume));
-    assertEquals(NUM_VOLUMES - 1, volumeList.getVolumes().size());
   }
 
   @Test
@@ -386,7 +340,8 @@ public class TestFsDatasetImpl {
     File badDir = new File(BASE_DIR, "bad");
     badDir.mkdirs();
     doReturn(mockVolume).when(spyDataset)
-        .createFsVolume(anyString(), any(File.class), any(StorageType.class));
+        .createFsVolume(anyString(), any(StorageDirectory.class),
+            any(StorageLocation.class));
     doThrow(new IOException("Failed to getVolumeMap()"))
       .when(mockVolume).getVolumeMap(
         anyString(),
@@ -396,7 +351,8 @@ public class TestFsDatasetImpl {
     Storage.StorageDirectory sd = createStorageDirectory(badDir);
     sd.lock();
     DataStorage.VolumeBuilder builder = new DataStorage.VolumeBuilder(storage, sd);
-    when(storage.prepareVolume(eq(datanode), eq(badDir.getAbsoluteFile()),
+    when(storage.prepareVolume(eq(datanode),
+        eq(StorageLocation.parse(badDir.toURI().toString())),
         Matchers.<List<NamespaceInfo>>any()))
         .thenReturn(builder);
 
@@ -540,7 +496,7 @@ public class TestFsDatasetImpl {
     DataStorage.VolumeBuilder builder =
         new DataStorage.VolumeBuilder(storage, sd);
     when(
-        storage.prepareVolume(eq(datanode), eq(loc.getFile()),
+        storage.prepareVolume(eq(datanode), eq(loc),
             anyListOf(NamespaceInfo.class))).thenReturn(builder);
 
     String cacheFilePath =
@@ -584,52 +540,102 @@ public class TestFsDatasetImpl {
     return dfsUsed;
   }
 
-  @Test(timeout = 30000)
+  @Test(timeout = 60000)
   public void testRemoveVolumeBeingWritten() throws Exception {
     // Will write and remove on dn0.
     final ExtendedBlock eb = new ExtendedBlock(BLOCK_POOL_IDS[0], 0);
     final CountDownLatch startFinalizeLatch = new CountDownLatch(1);
-    final CountDownLatch brReceivedLatch = new CountDownLatch(1);
+    final CountDownLatch blockReportReceivedLatch = new CountDownLatch(1);
+    final CountDownLatch volRemoveStartedLatch = new CountDownLatch(1);
+    final CountDownLatch volRemoveCompletedLatch = new CountDownLatch(1);
     class BlockReportThread extends Thread {
       public void run() {
+        // Lets wait for the volume remove process to start
+        try {
+          volRemoveStartedLatch.await();
+        } catch (Exception e) {
+          LOG.info("Unexpected exception when waiting for vol removal:", e);
+        }
         LOG.info("Getting block report");
         dataset.getBlockReports(eb.getBlockPoolId());
         LOG.info("Successfully received block report");
-        brReceivedLatch.countDown();
+        blockReportReceivedLatch.countDown();
       }
     }
 
-    final BlockReportThread brt = new BlockReportThread();
     class ResponderThread extends Thread {
       public void run() {
         try (ReplicaHandler replica = dataset
-            .createRbw(StorageType.DEFAULT, eb, false)) {
-          LOG.info("createRbw finished");
+            .createRbw(StorageType.DEFAULT, null, eb, false)) {
+          LOG.info("CreateRbw finished");
           startFinalizeLatch.countDown();
 
-          // Slow down while we're holding the reference to the volume
-          Thread.sleep(1000);
-          dataset.finalizeBlock(eb);
-          LOG.info("finalizeBlock finished");
+          // Slow down while we're holding the reference to the volume.
+          // As we finalize a block, the volume is removed in parallel.
+          // Ignore any interrupts coming out of volume shutdown.
+          try {
+            Thread.sleep(1000);
+          } catch (InterruptedException ie) {
+            LOG.info("Ignoring ", ie);
+          }
+
+          // Lets wait for the other thread finish getting block report
+          blockReportReceivedLatch.await();
+
+          dataset.finalizeBlock(eb, false);
+          LOG.info("FinalizeBlock finished");
         } catch (Exception e) {
           LOG.warn("Exception caught. This should not affect the test", e);
         }
       }
     }
 
-    ResponderThread res = new ResponderThread();
-    res.start();
+    class VolRemoveThread extends Thread {
+      public void run() {
+        Set<StorageLocation> volumesToRemove = new HashSet<>();
+        try {
+          volumesToRemove.add(dataset.getVolume(eb).getStorageLocation());
+        } catch (Exception e) {
+          LOG.info("Problem preparing volumes to remove: ", e);
+          Assert.fail("Exception in remove volume thread, check log for " +
+              "details.");
+        }
+        LOG.info("Removing volume " + volumesToRemove);
+        dataset.removeVolumes(volumesToRemove, true);
+        volRemoveCompletedLatch.countDown();
+        LOG.info("Removed volume " + volumesToRemove);
+      }
+    }
+
+    // Start the volume write operation
+    ResponderThread responderThread = new ResponderThread();
+    responderThread.start();
     startFinalizeLatch.await();
 
-    Set<File> volumesToRemove = new HashSet<>();
-    volumesToRemove.add(
-        StorageLocation.parse(dataset.getVolume(eb).getBasePath()).getFile());
-    LOG.info("Removing volume " + volumesToRemove);
-    // Verify block report can be received during this
-    brt.start();
-    dataset.removeVolumes(volumesToRemove, true);
-    LOG.info("Volumes removed");
-    brReceivedLatch.await();
+    // Start the block report get operation
+    final BlockReportThread blockReportThread = new BlockReportThread();
+    blockReportThread.start();
+
+    // Start the volume remove operation
+    VolRemoveThread volRemoveThread = new VolRemoveThread();
+    volRemoveThread.start();
+
+    // Let volume write and remove operation be
+    // blocked for few seconds
+    Thread.sleep(2000);
+
+    // Signal block report receiver and volume writer
+    // thread to complete their operations so that vol
+    // remove can proceed
+    volRemoveStartedLatch.countDown();
+
+    // Verify if block report can be received
+    // when volume is in use and also being removed
+    blockReportReceivedLatch.await();
+
+    // Verify if volume can be removed safely when there
+    // are read/write operation in-progress
+    volRemoveCompletedLatch.await();
   }
 
   /**
@@ -643,6 +649,9 @@ public class TestFsDatasetImpl {
       Configuration config = new HdfsConfiguration();
       config.setLong(
           DFSConfigKeys.DFS_DATANODE_XCEIVER_STOP_TIMEOUT_MILLIS_KEY, 1000);
+      config.setTimeDuration(
+          DFSConfigKeys.DFS_DATANODE_DISK_CHECK_MIN_GAP_KEY, 0,
+          TimeUnit.MILLISECONDS);
       config.setInt(DFSConfigKeys.DFS_DATANODE_FAILED_VOLUMES_TOLERATED_KEY, 1);
 
       cluster = new MiniDFSCluster.Builder(config).numDataNodes(1).build();
@@ -660,6 +669,8 @@ public class TestFsDatasetImpl {
           getVolume(block);
       File finalizedDir = volume.getFinalizedDir(cluster.getNamesystem()
           .getBlockPoolId());
+      LocatedBlock lb = DFSTestUtil.getAllBlocks(fs, filePath).get(0);
+      DatanodeInfo info = lb.getLocations()[0];
 
       if (finalizedDir.exists()) {
         // Remove write and execute access so that checkDiskErrorThread detects
@@ -670,15 +681,14 @@ public class TestFsDatasetImpl {
       Assert.assertTrue("Reference count for the volume should be greater "
           + "than 0", volume.getReferenceCount() > 0);
       // Invoke the synchronous checkDiskError method
-      dataNode.getFSDataset().checkDataDir();
+      dataNode.checkDiskError();
       // Sleep for 1 second so that datanode can interrupt and cluster clean up
       GenericTestUtils.waitFor(new Supplier<Boolean>() {
           @Override public Boolean get() {
               return volume.getReferenceCount() == 0;
             }
-          }, 100, 10);
-      LocatedBlock lb = DFSTestUtil.getAllBlocks(fs, filePath).get(0);
-      DatanodeInfo info = lb.getLocations()[0];
+          }, 100, 1000);
+      assertThat(dataNode.getFSDataset().getNumFailedVolumes(), is(1));
 
       try {
         out.close();

@@ -30,8 +30,6 @@ import java.text.SimpleDateFormat;
 import java.util.Collection;
 import java.util.Date;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -39,6 +37,10 @@ import org.apache.hadoop.fs.Options.Rename;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.util.Time;
+
+import com.google.common.annotations.VisibleForTesting;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Provides a <i>trash</i> feature.  Files are moved to a user's trash
  * directory, a subdirectory of their home directory named ".Trash".  Files are
@@ -52,8 +54,8 @@ import org.apache.hadoop.util.Time;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public class TrashPolicyDefault extends TrashPolicy {
-  private static final Log LOG =
-    LogFactory.getLog(TrashPolicyDefault.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TrashPolicyDefault.class);
 
   private static final Path CURRENT = new Path("Current");
 
@@ -75,7 +77,11 @@ public class TrashPolicyDefault extends TrashPolicy {
     initialize(conf, fs);
   }
 
+  /**
+   * @deprecated Use {@link #initialize(Configuration, FileSystem)} instead.
+   */
   @Override
+  @Deprecated
   public void initialize(Configuration conf, FileSystem fs, Path home) {
     this.fs = fs;
     this.deletionInterval = (long)(conf.getFloat(
@@ -106,6 +112,7 @@ public class TrashPolicyDefault extends TrashPolicy {
     return deletionInterval != 0;
   }
 
+  @SuppressWarnings("deprecation")
   @Override
   public boolean moveToTrash(Path path) throws IOException {
     if (!isEnabled())
@@ -114,9 +121,8 @@ public class TrashPolicyDefault extends TrashPolicy {
     if (!path.isAbsolute())                       // make path absolute
       path = new Path(fs.getWorkingDirectory(), path);
 
-    if (!fs.exists(path))                         // check that path exists
-      throw new FileNotFoundException(path.toString());
-
+    // check that path exists
+    fs.getFileStatus(path);
     String qpath = fs.makeQualified(path).toString();
 
     Path trashRoot = fs.getTrashRoot(path);
@@ -156,10 +162,11 @@ public class TrashPolicyDefault extends TrashPolicy {
           trashPath = new Path(orig + Time.now());
         }
         
-        if (fs.rename(path, trashPath)) {           // move to current trash
-          LOG.info("Moved: '" + path + "' to trash at: " + trashPath);
-          return true;
-        }
+        // move to current trash
+        fs.rename(path, trashPath,
+            Rename.TO_TRASH);
+        LOG.info("Moved: '" + path + "' to trash at: " + trashPath);
+        return true;
       } catch (IOException e) {
         cause = e;
       }
@@ -209,7 +216,7 @@ public class TrashPolicyDefault extends TrashPolicy {
     return new Emptier(getConf(), emptierInterval);
   }
 
-  private class Emptier implements Runnable {
+  protected class Emptier implements Runnable {
 
     private Configuration conf;
     private long emptierInterval;
@@ -217,7 +224,7 @@ public class TrashPolicyDefault extends TrashPolicy {
     Emptier(Configuration conf, long emptierInterval) throws IOException {
       this.conf = conf;
       this.emptierInterval = emptierInterval;
-      if (emptierInterval > deletionInterval || emptierInterval == 0) {
+      if (emptierInterval > deletionInterval || emptierInterval <= 0) {
         LOG.info("The configured checkpoint interval is " +
                  (emptierInterval / MSECS_PER_MINUTE) + " minutes." +
                  " Using an interval of " +
@@ -280,6 +287,11 @@ public class TrashPolicyDefault extends TrashPolicy {
     }
     private long floor(long time, long interval) {
       return (time / interval) * interval;
+    }
+
+    @VisibleForTesting
+    protected long getEmptierInterval() {
+      return this.emptierInterval/MSECS_PER_MINUTE;
     }
   }
 

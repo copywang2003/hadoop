@@ -58,8 +58,10 @@ public class HttpFSParametersProvider extends ParametersProvider {
     PARAMS_DEF.put(Operation.GETHOMEDIRECTORY, new Class[]{});
     PARAMS_DEF.put(Operation.GETCONTENTSUMMARY, new Class[]{});
     PARAMS_DEF.put(Operation.GETFILECHECKSUM, new Class[]{});
-    PARAMS_DEF.put(Operation.GETFILEBLOCKLOCATIONS, new Class[]{});
+    PARAMS_DEF.put(Operation.GETFILEBLOCKLOCATIONS,
+        new Class[] {OffsetParam.class, LenParam.class});
     PARAMS_DEF.put(Operation.GETACLSTATUS, new Class[]{});
+    PARAMS_DEF.put(Operation.GETTRASHROOT, new Class[]{});
     PARAMS_DEF.put(Operation.INSTRUMENTATION, new Class[]{});
     PARAMS_DEF.put(Operation.APPEND, new Class[]{DataParam.class});
     PARAMS_DEF.put(Operation.CONCAT, new Class[]{SourcesParam.class});
@@ -91,6 +93,20 @@ public class HttpFSParametersProvider extends ParametersProvider {
     PARAMS_DEF.put(Operation.GETXATTRS, 
         new Class[]{XAttrNameParam.class, XAttrEncodingParam.class});
     PARAMS_DEF.put(Operation.LISTXATTRS, new Class[]{});
+    PARAMS_DEF.put(Operation.LISTSTATUS_BATCH,
+        new Class[]{StartAfterParam.class});
+    PARAMS_DEF.put(Operation.GETALLSTORAGEPOLICY, new Class[] {});
+    PARAMS_DEF.put(Operation.GETSTORAGEPOLICY, new Class[] {});
+    PARAMS_DEF.put(Operation.SETSTORAGEPOLICY,
+        new Class[] {PolicyNameParam.class});
+    PARAMS_DEF.put(Operation.UNSETSTORAGEPOLICY, new Class[] {});
+    PARAMS_DEF.put(Operation.CREATESNAPSHOT,
+            new Class[] {SnapshotNameParam.class});
+    PARAMS_DEF.put(Operation.DELETESNAPSHOT,
+            new Class[] {SnapshotNameParam.class});
+    PARAMS_DEF.put(Operation.RENAMESNAPSHOT,
+            new Class[] {OldSnapshotNameParam.class,
+                SnapshotNameParam.class});
   }
 
   public HttpFSParametersProvider() {
@@ -520,4 +536,78 @@ public class HttpFSParametersProvider extends ParametersProvider {
       super(NAME, XAttrCodec.class, null);
     }
   }
+
+  /**
+   * Class for startafter parameter.
+   */
+  @InterfaceAudience.Private
+  public static class StartAfterParam extends StringParam {
+    /**
+     * Parameter name.
+     */
+    public static final String NAME = HttpFSFileSystem.START_AFTER_PARAM;
+
+    /**
+     * Constructor.
+     */
+    public StartAfterParam() {
+      super(NAME, null);
+    }
+  }
+
+  /**
+   * Class for policyName parameter.
+   */
+  @InterfaceAudience.Private
+  public static class PolicyNameParam extends StringParam {
+    /**
+     * Parameter name.
+     */
+    public static final String NAME = HttpFSFileSystem.POLICY_NAME_PARAM;
+
+    /**
+     * Constructor.
+     */
+    public PolicyNameParam() {
+      super(NAME, null);
+    }
+  }
+
+  /**
+   * Class for SnapshotName parameter.
+   */
+  public static class SnapshotNameParam extends StringParam {
+
+    /**
+     * Parameter name.
+     */
+    public static final String NAME = HttpFSFileSystem.SNAPSHOT_NAME_PARAM;
+
+    /**
+     * Constructor.
+     */
+    public SnapshotNameParam() {
+      super(NAME, null);
+    }
+
+  }
+
+  /**
+   * Class for OldSnapshotName parameter.
+   */
+  public static class OldSnapshotNameParam extends StringParam {
+
+    /**
+     * Parameter name.
+     */
+    public static final String NAME = HttpFSFileSystem.OLD_SNAPSHOT_NAME_PARAM;
+
+    /**
+     * Constructor.
+     */
+    public OldSnapshotNameParam() {
+      super(NAME, null);
+    }
+  }
+
 }

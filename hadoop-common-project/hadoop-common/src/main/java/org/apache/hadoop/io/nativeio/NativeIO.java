@@ -40,9 +40,9 @@ import org.apache.hadoop.io.SecureIOUtils.AlreadyExistsException;
 import org.apache.hadoop.util.NativeCodeLoader;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.PerformanceAdvisory;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import sun.misc.Unsafe;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -98,7 +98,7 @@ public class NativeIO {
        write.  */
     public static int SYNC_FILE_RANGE_WAIT_AFTER = 4;
 
-    private static final Log LOG = LogFactory.getLog(NativeIO.class);
+    private static final Logger LOG = LoggerFactory.getLogger(NativeIO.class);
 
     // Set to true via JNI if possible
     public static boolean fadvisePossible = false;
@@ -570,7 +570,7 @@ public class NativeIO {
     private static native String getOwner(FileDescriptor fd) throws IOException;
 
     /** Supported list of Windows access right flags */
-    public static enum AccessRight {
+    public enum AccessRight {
       ACCESS_READ (0x0001),      // FILE_READ_DATA
       ACCESS_WRITE (0x0002),     // FILE_WRITE_DATA
       ACCESS_EXECUTE (0x0020);   // FILE_EXECUTE
@@ -634,7 +634,7 @@ public class NativeIO {
     }
   }
 
-  private static final Log LOG = LogFactory.getLog(NativeIO.class);
+  private static final Logger LOG = LoggerFactory.getLogger(NativeIO.class);
 
   private static boolean nativeLoaded = false;
 
@@ -742,47 +742,19 @@ public class NativeIO {
   }
 
   /**
-   * Create a FileInputStream that shares delete permission on the
-   * file opened, i.e. other process can delete the file the
-   * FileInputStream is reading. Only Windows implementation uses
-   * the native interface.
-   */
-  public static FileInputStream getShareDeleteFileInputStream(File f)
-      throws IOException {
-    if (!Shell.WINDOWS) {
-      // On Linux the default FileInputStream shares delete permission
-      // on the file opened.
-      //
-      return new FileInputStream(f);
-    } else {
-      // Use Windows native interface to create a FileInputStream that
-      // shares delete permission on the file opened.
-      //
-      FileDescriptor fd = Windows.createFile(
-          f.getAbsolutePath(),
-          Windows.GENERIC_READ,
-          Windows.FILE_SHARE_READ |
-              Windows.FILE_SHARE_WRITE |
-              Windows.FILE_SHARE_DELETE,
-          Windows.OPEN_EXISTING);
-      return new FileInputStream(fd);
-    }
-  }
-
-  /**
-   * Create a FileInputStream that shares delete permission on the
+   * Create a FileDescriptor that shares delete permission on the
    * file opened at a given offset, i.e. other process can delete
-   * the file the FileInputStream is reading. Only Windows implementation
+   * the file the FileDescriptor is reading. Only Windows implementation
    * uses the native interface.
    */
-  public static FileInputStream getShareDeleteFileInputStream(File f, long seekOffset)
-      throws IOException {
+  public static FileDescriptor getShareDeleteFileDescriptor(
+      File f, long seekOffset) throws IOException {
     if (!Shell.WINDOWS) {
       RandomAccessFile rf = new RandomAccessFile(f, "r");
       if (seekOffset > 0) {
         rf.seek(seekOffset);
       }
-      return new FileInputStream(rf.getFD());
+      return rf.getFD();
     } else {
       // Use Windows native interface to create a FileInputStream that
       // shares delete permission on the file opened, and set it to the
@@ -797,7 +769,7 @@ public class NativeIO {
           NativeIO.Windows.OPEN_EXISTING);
       if (seekOffset > 0)
         NativeIO.Windows.setFilePointer(fd, seekOffset, NativeIO.Windows.FILE_BEGIN);
-      return new FileInputStream(fd);
+      return fd;
     }
   }
 
@@ -968,10 +940,10 @@ public class NativeIO {
           position += transferred;
         }
       } finally {
-        IOUtils.cleanup(LOG, output);
-        IOUtils.cleanup(LOG, fos);
-        IOUtils.cleanup(LOG, input);
-        IOUtils.cleanup(LOG, fis);
+        IOUtils.cleanupWithLogger(LOG, output);
+        IOUtils.cleanupWithLogger(LOG, fos);
+        IOUtils.cleanupWithLogger(LOG, input);
+        IOUtils.cleanupWithLogger(LOG, fis);
       }
     }
   }

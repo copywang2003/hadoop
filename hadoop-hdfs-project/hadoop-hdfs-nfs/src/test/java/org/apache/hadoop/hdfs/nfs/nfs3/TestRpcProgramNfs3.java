@@ -30,10 +30,10 @@ import java.util.EnumSet;
 
 import org.apache.hadoop.crypto.key.JavaKeyStoreProvider;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
@@ -135,7 +135,7 @@ public class TestRpcProgramNfs3 {
     String testRoot = fsHelper.getTestRootDir();
     testRootDir = new File(testRoot).getAbsoluteFile();
     final Path jksPath = new Path(testRootDir.toString(), "test.jks");
-    config.set(DFSConfigKeys.DFS_ENCRYPTION_KEY_PROVIDER_URI,
+    config.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_KEY_PROVIDER_PATH,
         JavaKeyStoreProvider.SCHEME_NAME + "://file" + jksPath.toUri());
     ProxyUsers.refreshSuperUserGroupsConfiguration(config);
 
@@ -749,7 +749,7 @@ public class TestRpcProgramNfs3 {
     assertEquals("Incorrect COMMIT3Response:", null, response2);
   }
 
-  @Test(timeout=1000)
+  @Test(timeout=10000)
   public void testIdempotent() {
     Object[][] procedures = {
         { Nfs3Constant.NFSPROC3.NULL, 1 },

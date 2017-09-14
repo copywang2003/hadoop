@@ -48,6 +48,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Random;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -55,8 +56,6 @@ import java.util.regex.Pattern;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParser;
 import javax.xml.parsers.SAXParserFactory;
-
-import com.google.common.io.Files;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.output.NullOutputStream;
@@ -69,11 +68,18 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystemTestHelper;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.protocol.BlockType;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
+import org.apache.hadoop.hdfs.protocol.SystemErasureCodingPolicies;
 import org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil;
+import org.apache.hadoop.hdfs.server.namenode.INodeFile;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeLayoutVersion;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.io.IOUtils;
@@ -84,9 +90,8 @@ import org.apache.log4j.Level;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.xml.sax.Attributes;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
@@ -100,11 +105,11 @@ public class TestOfflineImageViewer {
   private static final int FILES_PER_DIR = 4;
   private static final String TEST_RENEWER = "JobTracker";
   private static File originalFsimage = null;
+  private static int filesECCount = 0;
 
   // namespace as written to dfs, to be compared with viewer's output
   final static HashMap<String, FileStatus> writtenFiles = Maps.newHashMap();
   static int dirCount = 0;
-
   private static File tempDir;
 
   // Create a populated namespace for later testing. Save its contents to a
@@ -113,9 +118,15 @@ public class TestOfflineImageViewer {
   // multiple tests.
   @BeforeClass
   public static void createOriginalFSImage() throws IOException {
-    tempDir = Files.createTempDir();
+    File[] nnDirs = MiniDFSCluster.getNameNodeDirectory(
+        MiniDFSCluster.getBaseDirectory(), 0, 0);
+    tempDir = nnDirs[0];
+
     MiniDFSCluster cluster = null;
     try {
+      final ErasureCodingPolicy ecPolicy = SystemErasureCodingPolicies
+          .getByID(SystemErasureCodingPolicies.XOR_2_1_POLICY_ID);
+
       Configuration conf = new Configuration();
       conf.setLong(
           DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_MAX_LIFETIME_KEY, 10000);
@@ -126,9 +137,10 @@ public class TestOfflineImageViewer {
       conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_ACLS_ENABLED_KEY, true);
       conf.set(CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTH_TO_LOCAL,
           "RULE:[2:$1@$0](JobTracker@.*FOO.COM)s/@.*//" + "DEFAULT");
-      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(3).build();
       cluster.waitActive();
       DistributedFileSystem hdfs = cluster.getFileSystem();
+      hdfs.enableErasureCodingPolicy(ecPolicy.getName());
 
       // Create a reasonable namespace
       for (int i = 0; i < NUM_DIRS; i++, dirCount++) {
@@ -157,6 +169,15 @@ public class TestOfflineImageViewer {
       hdfs.mkdirs(invalidXMLDir);
       dirCount++;
 
+      //Create a directory with sticky bits
+      Path stickyBitDir = new Path("/stickyBit");
+      hdfs.mkdirs(stickyBitDir);
+      hdfs.setPermission(stickyBitDir, new FsPermission(FsAction.ALL,
+          FsAction.ALL, FsAction.ALL, true));
+      dirCount++;
+      writtenFiles.put(stickyBitDir.toString(),
+          hdfs.getFileStatus(stickyBitDir));
+
       // Get delegation tokens so we log the delegation token op
       Token<?>[] delegationTokens = hdfs
           .addDelegationTokens(TEST_RENEWER, null);
@@ -169,14 +190,27 @@ public class TestOfflineImageViewer {
       hdfs.mkdirs(src);
       dirCount++;
       writtenFiles.put(src.toString(), hdfs.getFileStatus(src));
+
+      // Create snapshot and snapshotDiff.
       final Path orig = new Path("/src/orig");
       hdfs.mkdirs(orig);
+      final Path file1 = new Path("/src/file");
+      FSDataOutputStream o = hdfs.create(file1);
+      o.write(23);
+      o.write(45);
+      o.close();
       hdfs.allowSnapshot(src);
       hdfs.createSnapshot(src, "snapshot");
       final Path dst = new Path("/dst");
+      // Rename a directory in the snapshot directory to add snapshotCopy
+      // field to the dirDiff entry.
       hdfs.rename(orig, dst);
       dirCount++;
       writtenFiles.put(dst.toString(), hdfs.getFileStatus(dst));
+      // Truncate a file in the snapshot directory to add snapshotCopy and
+      // blocks fields to the fileDiff entry.
+      hdfs.truncate(file1, 1);
+      writtenFiles.put(file1.toString(), hdfs.getFileStatus(file1));
 
       // Set XAttrs so the fsimage contains XAttr ops
       final Path xattr = new Path("/xattr");
@@ -199,9 +233,36 @@ public class TestOfflineImageViewer {
               aclEntry(ACCESS, GROUP, "bar", READ_EXECUTE),
               aclEntry(ACCESS, OTHER, EXECUTE)));
 
+      // Create an Erasure Coded dir
+      Path ecDir = new Path("/ec");
+      hdfs.mkdirs(ecDir);
+      dirCount++;
+      hdfs.getClient().setErasureCodingPolicy(ecDir.toString(),
+          ecPolicy.getName());
+      writtenFiles.put(ecDir.toString(), hdfs.getFileStatus(ecDir));
+
+      // Create an empty Erasure Coded file
+      Path emptyECFile = new Path(ecDir, "EmptyECFile.txt");
+      hdfs.create(emptyECFile).close();
+      writtenFiles.put(emptyECFile.toString(),
+          pathToFileEntry(hdfs, emptyECFile.toString()));
+      filesECCount++;
+
+      // Create a small Erasure Coded file
+      Path smallECFile = new Path(ecDir, "SmallECFile.txt");
+      FSDataOutputStream out = hdfs.create(smallECFile);
+      Random r = new Random();
+      byte[] bytes = new byte[1024 * 10];
+      r.nextBytes(bytes);
+      out.write(bytes);
+      writtenFiles.put(smallECFile.toString(),
+          pathToFileEntry(hdfs, smallECFile.toString()));
+      filesECCount++;
+
       // Write results to the fsimage file
       hdfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
       hdfs.saveNamespace();
+      hdfs.setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
 
       // Determine location of fsimage file
       originalFsimage = FSImageTestUtil.findLatestImageFile(FSImageTestUtil
@@ -236,7 +297,7 @@ public class TestOfflineImageViewer {
     File truncatedFile = new File(tempDir, "truncatedFsImage");
     PrintStream output = new PrintStream(NullOutputStream.NULL_OUTPUT_STREAM);
     copyPartOfFile(originalFsimage, truncatedFile);
-    new FileDistributionCalculator(new Configuration(), 0, 0, output)
+    new FileDistributionCalculator(new Configuration(), 0, 0, false, output)
         .visit(new RandomAccessFile(truncatedFile, "r"));
   }
 
@@ -258,7 +319,7 @@ public class TestOfflineImageViewer {
   public void testFileDistributionCalculator() throws IOException {
     ByteArrayOutputStream output = new ByteArrayOutputStream();
     PrintStream o = new PrintStream(output);
-    new FileDistributionCalculator(new Configuration(), 0, 0, o)
+    new FileDistributionCalculator(new Configuration(), 0, 0, false, o)
         .visit(new RandomAccessFile(originalFsimage, "r"));
     o.close();
 
@@ -267,7 +328,7 @@ public class TestOfflineImageViewer {
     Matcher matcher = p.matcher(outputString);
     assertTrue(matcher.find() && matcher.groupCount() == 1);
     int totalFiles = Integer.parseInt(matcher.group(1));
-    assertEquals(NUM_DIRS * FILES_PER_DIR, totalFiles);
+    assertEquals(NUM_DIRS * FILES_PER_DIR + filesECCount + 1, totalFiles);
 
     p = Pattern.compile("totalDirectories = (\\d+)\n");
     matcher = p.matcher(outputString);
@@ -298,6 +359,95 @@ public class TestOfflineImageViewer {
     assertEquals(0, status);
   }
 
+  /**
+   *  SAX handler to verify EC Files and their policies.
+   */
+  class ECXMLHandler extends DefaultHandler {
+
+    private boolean isInode = false;
+    private boolean isAttrRepl = false;
+    private boolean isAttrName = false;
+    private boolean isXAttrs = false;
+    private boolean isAttrECPolicy = false;
+    private boolean isAttrBlockType = false;
+    private String currentInodeName;
+    private String currentECPolicy;
+    private String currentBlockType;
+    private String currentRepl;
+
+    @Override
+    public void startElement(String uri, String localName, String qName,
+        Attributes attributes) throws SAXException {
+      super.startElement(uri, localName, qName, attributes);
+      if (qName.equalsIgnoreCase(PBImageXmlWriter.INODE_SECTION_INODE)) {
+        isInode = true;
+      } else if (isInode && !isXAttrs && qName.equalsIgnoreCase(
+          PBImageXmlWriter.SECTION_NAME)) {
+        isAttrName = true;
+      } else if (isInode && qName.equalsIgnoreCase(
+          PBImageXmlWriter.SECTION_REPLICATION)) {
+        isAttrRepl = true;
+      } else if (isInode &&
+          qName.equalsIgnoreCase(PBImageXmlWriter.INODE_SECTION_EC_POLICY_ID)) {
+        isAttrECPolicy = true;
+      } else if (isInode && qName.equalsIgnoreCase(
+          PBImageXmlWriter.INODE_SECTION_BLOCK_TYPE)) {
+        isAttrBlockType = true;
+      } else if (isInode && qName.equalsIgnoreCase(
+          PBImageXmlWriter.INODE_SECTION_XATTRS)) {
+        isXAttrs = true;
+      }
+    }
+
+    @Override
+    public void endElement(String uri, String localName, String qName)
+        throws SAXException {
+      super.endElement(uri, localName, qName);
+      if (qName.equalsIgnoreCase(PBImageXmlWriter.INODE_SECTION_INODE)) {
+        if (currentInodeName != null && currentInodeName.length() > 0) {
+          if (currentBlockType != null && currentBlockType.equalsIgnoreCase(
+              BlockType.STRIPED.name())) {
+            Assert.assertEquals("INode '"
+                    + currentInodeName + "' has unexpected EC Policy!",
+                Byte.parseByte(currentECPolicy),
+                SystemErasureCodingPolicies.XOR_2_1_POLICY_ID);
+            Assert.assertEquals("INode '"
+                    + currentInodeName + "' has unexpected replication!",
+                currentRepl,
+                Short.toString(INodeFile.DEFAULT_REPL_FOR_STRIPED_BLOCKS));
+          }
+        }
+        isInode = false;
+        currentInodeName = "";
+        currentECPolicy = "";
+        currentRepl = "";
+      } else if (qName.equalsIgnoreCase(
+          PBImageXmlWriter.INODE_SECTION_XATTRS)) {
+        isXAttrs = false;
+      }
+    }
+
+    @Override
+    public void characters(char[] ch, int start, int length)
+        throws SAXException {
+      super.characters(ch, start, length);
+      String value = new String(ch, start, length);
+      if (isAttrName) {
+        currentInodeName = value;
+        isAttrName = false;
+      } else if (isAttrRepl) {
+        currentRepl = value;
+        isAttrRepl = false;
+      } else if (isAttrECPolicy) {
+        currentECPolicy = value;
+        isAttrECPolicy = false;
+      } else if (isAttrBlockType) {
+        currentBlockType = value;
+        isAttrBlockType = false;
+      }
+    }
+  }
+
   @Test
   public void testPBImageXmlWriter() throws IOException, SAXException,
       ParserConfigurationException {
@@ -308,7 +458,8 @@ public class TestOfflineImageViewer {
     SAXParserFactory spf = SAXParserFactory.newInstance();
     SAXParser parser = spf.newSAXParser();
     final String xml = output.toString();
-    parser.parse(new InputSource(new StringReader(xml)), new DefaultHandler());
+    ECXMLHandler ecxmlHandler = new ECXMLHandler();
+    parser.parse(new InputSource(new StringReader(xml)), ecxmlHandler);
   }
 
   @Test
@@ -349,6 +500,24 @@ public class TestOfflineImageViewer {
       // LISTSTATUS operation to a invalid prefix
       url = new URL("http://localhost:" + port + "/foo");
       verifyHttpResponseCode(HttpURLConnection.HTTP_NOT_FOUND, url);
+
+      // Verify the Erasure Coded empty file status
+      Path emptyECFilePath = new Path("/ec/EmptyECFile.txt");
+      FileStatus actualEmptyECFileStatus =
+          webhdfs.getFileStatus(new Path(emptyECFilePath.toString()));
+      FileStatus expectedEmptyECFileStatus = writtenFiles.get(
+          emptyECFilePath.toString());
+      System.out.println(webhdfs.getFileStatus(new Path(emptyECFilePath
+              .toString())));
+      compareFile(expectedEmptyECFileStatus, actualEmptyECFileStatus);
+
+      // Verify the Erasure Coded small file status
+      Path smallECFilePath = new Path("/ec/SmallECFile.txt");
+      FileStatus actualSmallECFileStatus =
+          webhdfs.getFileStatus(new Path(smallECFilePath.toString()));
+      FileStatus expectedSmallECFileStatus = writtenFiles.get(
+          smallECFilePath.toString());
+      compareFile(expectedSmallECFileStatus, actualSmallECFileStatus);
 
       // GETFILESTATUS operation
       status = webhdfs.getFileStatus(new Path("/dir0/file0"));
@@ -550,6 +719,93 @@ public class TestOfflineImageViewer {
           "version mismatch.");
     } catch (Throwable t) {
       GenericTestUtils.assertExceptionContains("Layout version mismatch.", t);
+    }
+  }
+
+  @Test
+  public void testFileDistributionCalculatorForException() throws Exception {
+    File fsimageFile = null;
+    Configuration conf = new Configuration();
+    HashMap<String, FileStatus> files = Maps.newHashMap();
+
+    // Create a initial fsimage file
+    try (MiniDFSCluster cluster =
+        new MiniDFSCluster.Builder(conf).numDataNodes(1).build()) {
+      cluster.waitActive();
+      DistributedFileSystem hdfs = cluster.getFileSystem();
+
+      // Create a reasonable namespace
+      Path dir = new Path("/dir");
+      hdfs.mkdirs(dir);
+      files.put(dir.toString(), pathToFileEntry(hdfs, dir.toString()));
+      // Create files with byte size that can't be divided by step size,
+      // the byte size for here are 3, 9, 15, 21.
+      for (int i = 0; i < FILES_PER_DIR; i++) {
+        Path file = new Path(dir, "file" + i);
+        DFSTestUtil.createFile(hdfs, file, 6 * i + 3, (short) 1, 0);
+
+        files.put(file.toString(),
+            pathToFileEntry(hdfs, file.toString()));
+      }
+
+      // Write results to the fsimage file
+      hdfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
+      hdfs.saveNamespace();
+      // Determine location of fsimage file
+      fsimageFile =
+          FSImageTestUtil.findLatestImageFile(FSImageTestUtil
+              .getFSImage(cluster.getNameNode()).getStorage().getStorageDir(0));
+      if (fsimageFile == null) {
+        throw new RuntimeException("Didn't generate or can't find fsimage");
+      }
+    }
+
+    // Run the test with params -maxSize 23 and -step 4, it will not throw
+    // ArrayIndexOutOfBoundsException with index 6 when deals with
+    // 21 byte size file.
+    int status =
+        OfflineImageViewerPB.run(new String[] {"-i",
+            fsimageFile.getAbsolutePath(), "-o", "-", "-p",
+            "FileDistribution", "-maxSize", "23", "-step", "4"});
+    assertEquals(0, status);
+  }
+
+  @Test
+  public void testOfflineImageViewerMaxSizeAndStepOptions() throws Exception {
+    final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    final PrintStream out = new PrintStream(bytes);
+    final PrintStream oldOut = System.out;
+    try {
+      System.setOut(out);
+      // Add the -h option to make the test only for option parsing,
+      // and don't need to do the following operations.
+      OfflineImageViewer.main(new String[] {"-i", "-", "-o", "-", "-p",
+          "FileDistribution", "-maxSize", "512", "-step", "8", "-h"});
+      Assert.assertFalse(bytes.toString().contains(
+          "Error parsing command-line options: "));
+    } finally {
+      System.setOut(oldOut);
+      IOUtils.closeStream(out);
+    }
+  }
+
+  @Test
+  public void testOfflineImageViewerWithFormatOption() throws Exception {
+    final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    final PrintStream out = new PrintStream(bytes);
+    final PrintStream oldOut = System.out;
+    try {
+      System.setOut(out);
+      int status =
+          OfflineImageViewerPB.run(new String[] {"-i",
+              originalFsimage.getAbsolutePath(), "-o", "-", "-p",
+              "FileDistribution", "-maxSize", "512", "-step", "8",
+              "-format"});
+      assertEquals(0, status);
+      Assert.assertTrue(bytes.toString().contains("(0 B, 8 B]"));
+    } finally {
+      System.setOut(oldOut);
+      IOUtils.closeStream(out);
     }
   }
 }

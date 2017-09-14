@@ -35,7 +35,6 @@ ENV DEBCONF_TERSE true
 RUN apt-get -q update && apt-get -q install --no-install-recommends -y \
     build-essential \
     bzip2 \
-    cmake \
     curl \
     doxygen \
     fuse \
@@ -58,6 +57,7 @@ RUN apt-get -q update && apt-get -q install --no-install-recommends -y \
     protobuf-c-compiler \
     python \
     python2.7 \
+    python2.7-dev \
     python-pip \
     rsync \
     snappy \
@@ -81,13 +81,29 @@ RUN apt-get -q install --no-install-recommends -y oracle-java8-installer
 ####
 # Apps that require Java
 ###
-RUN apt-get -q update && apt-get -q install --no-install-recommends -y \
-    ant \
-    maven
+RUN apt-get -q update && apt-get -q install --no-install-recommends -y ant
 
-# Fixing the Apache commons / Maven dependency problem under Ubuntu:
-# See http://wiki.apache.org/commons/VfsProblems
-RUN cd /usr/share/maven/lib && ln -s ../../java/commons-lang.jar .
+######
+# Install Apache Maven
+######
+RUN mkdir -p /opt/maven && \
+    curl -L -s -S \
+         https://www-us.apache.org/dist/maven/maven-3/3.3.9/binaries/apache-maven-3.3.9-bin.tar.gz \
+         -o /opt/maven.tar.gz && \
+    tar xzf /opt/maven.tar.gz --strip-components 1 -C /opt/maven
+ENV MAVEN_HOME /opt/maven
+ENV PATH "${PATH}:/opt/maven/bin"
+
+######
+# Install cmake
+######
+RUN mkdir -p /opt/cmake && \
+    curl -L -s -S \
+         https://cmake.org/files/v3.1/cmake-3.1.0-Linux-x86_64.tar.gz \
+         -o /opt/cmake.tar.gz && \
+    tar xzf /opt/cmake.tar.gz --strip-components 1 -C /opt/cmake
+ENV CMAKE_HOME /opt/cmake
+ENV PATH "${PATH}:/opt/cmake/bin"
 
 ######
 # Install findbugs
@@ -98,6 +114,7 @@ RUN mkdir -p /opt/findbugs && \
          -o /opt/findbugs.tar.gz && \
     tar xzf /opt/findbugs.tar.gz --strip-components 1 -C /opt/findbugs
 ENV FINDBUGS_HOME /opt/findbugs
+ENV PATH "${PATH}:/opt/findbugs/bin"
 
 ####
 # Install shellcheck
@@ -131,6 +148,16 @@ RUN pip install python-dateutil
 # Avoid out of memory errors in builds
 ###
 ENV MAVEN_OPTS -Xms256m -Xmx512m
+
+###
+# Install node js tools for web UI frameowkr
+###
+RUN apt-get -y install nodejs && \
+    ln -s /usr/bin/nodejs /usr/bin/node && \
+    apt-get -y install npm && \
+    npm install npm@latest -g && \
+    npm install -g bower && \
+    npm install -g ember-cli
 
 ###
 # Everything past this point is either not needed for testing or breaks Yetus.

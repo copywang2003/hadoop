@@ -18,14 +18,19 @@
 
 package org.apache.hadoop.yarn.server.nodemanager;
 
+import static org.apache.hadoop.test.PlatformAssumptions.assumeNotWindows;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assume.assumeTrue;
 import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyBoolean;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.FileReader;
@@ -39,19 +44,22 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
+import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ConfigurationException;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.ContainerDiagnosticsUpdateEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.privileged.PrivilegedOperation;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.privileged.PrivilegedOperationException;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.privileged.PrivilegedOperationExecutor;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.DefaultLinuxContainerRuntime;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.runtime.LinuxContainerRuntime;
@@ -71,13 +79,15 @@ import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 
 public class TestLinuxContainerExecutorWithMocks {
 
-  private static final Log LOG = LogFactory
-      .getLog(TestLinuxContainerExecutorWithMocks.class);
+  private static final Logger LOG =
+       LoggerFactory.getLogger(TestLinuxContainerExecutorWithMocks.class);
 
   private static final String MOCK_EXECUTOR =
       "./src/test/resources/mock-container-executor";
   private static final String MOCK_EXECUTOR_WITH_ERROR =
       "./src/test/resources/mock-container-executer-with-error";
+  private static final String MOCK_EXECUTOR_WITH_CONFIG_ERROR =
+      "./src/test/resources/mock-container-executer-with-configuration-error";
 
   private String tmpMockExecutor;
   private LinuxContainerExecutor mockExec = null;
@@ -123,12 +133,12 @@ public class TestLinuxContainerExecutorWithMocks {
 
   @Before
   public void setup() throws IOException, ContainerExecutionException {
-    assumeTrue(!Path.WINDOWS);
+    assumeNotWindows();
 
     tmpMockExecutor = System.getProperty("test.build.data") +
         "/tmp-mock-container-executor";
 
-    Configuration conf = new Configuration();
+    Configuration conf = new YarnConfiguration();
     LinuxContainerRuntime linuxContainerRuntime;
 
     setupMockExecutor(MOCK_EXECUTOR, conf);
@@ -147,7 +157,8 @@ public class TestLinuxContainerExecutorWithMocks {
   }
   
   @Test
-  public void testContainerLaunch() throws IOException {
+  public void testContainerLaunch()
+      throws IOException, ConfigurationException {
     String appSubmitter = "nobody";
     String cmd = String.valueOf(
         PrivilegedOperation.RunAsUserCommand.LAUNCH_CONTAINER.getValue());
@@ -180,6 +191,10 @@ public class TestLinuxContainerExecutorWithMocks {
         .setContainerWorkDir(workDir)
         .setLocalDirs(dirsHandler.getLocalDirs())
         .setLogDirs(dirsHandler.getLogDirs())
+        .setFilecacheDirs(new ArrayList<>())
+        .setUserLocalDirs(new ArrayList<>())
+        .setContainerLocalDirs(new ArrayList<>())
+        .setContainerLogDirs(new ArrayList<>())
         .build());
     assertEquals(0, ret);
     assertEquals(Arrays.asList(YarnConfiguration.DEFAULT_NM_NONSECURE_MODE_LOCAL_USER,
@@ -194,7 +209,8 @@ public class TestLinuxContainerExecutorWithMocks {
   }
 
   @Test (timeout = 5000)
-  public void testContainerLaunchWithPriority() throws IOException {
+  public void testContainerLaunchWithPriority()
+      throws IOException, ConfigurationException {
 
     // set the scheduler priority to make sure still works with nice -n prio
     Configuration conf = new Configuration();
@@ -216,7 +232,10 @@ public class TestLinuxContainerExecutorWithMocks {
   public void testLaunchCommandWithoutPriority() throws IOException {
     // make sure the command doesn't contain the nice -n since priority
     // not specified
-   List<String> command = new ArrayList<String>();
+    List<String> command = new ArrayList<String>();
+    Configuration conf = mockExec.getConf();
+    conf.unset(YarnConfiguration.NM_CONTAINER_EXECUTOR_SCHED_PRIORITY);
+    mockExec.setConf(conf);
     mockExec.addSchedPriorityCommand(command);
     assertEquals("addSchedPriority should be empty", 0, command.size());
   }
@@ -239,7 +258,7 @@ public class TestLinuxContainerExecutorWithMocks {
           .build());
 
       List<String> result=readMockParams();
-      Assert.assertEquals(result.size(), 18);
+      Assert.assertEquals(result.size(), 19);
       Assert.assertEquals(result.get(0), YarnConfiguration.DEFAULT_NM_NONSECURE_MODE_LOCAL_USER);
       Assert.assertEquals(result.get(1), "test");
       Assert.assertEquals(result.get(2), "0" );
@@ -265,98 +284,121 @@ public class TestLinuxContainerExecutorWithMocks {
   public void testContainerLaunchError()
       throws IOException, ContainerExecutionException {
 
-    // reinitialize executer
-    Configuration conf = new Configuration();
-    setupMockExecutor(MOCK_EXECUTOR_WITH_ERROR, conf);
-    conf.set(YarnConfiguration.NM_LOCAL_DIRS, "file:///bin/echo");
-    conf.set(YarnConfiguration.NM_LOG_DIRS, "file:///dev/null");
+    final String[] expecetedMessage = {"badcommand", "Exit code: 24"};
+    final String[] executor = {
+        MOCK_EXECUTOR_WITH_ERROR,
+        MOCK_EXECUTOR_WITH_CONFIG_ERROR
+    };
+
+    for (int i = 0; i < expecetedMessage.length; ++i) {
+      final int j = i;
+      // reinitialize executer
+      Configuration conf = new Configuration();
+      setupMockExecutor(executor[j], conf);
+      conf.set(YarnConfiguration.NM_LOCAL_DIRS, "file:///bin/echo");
+      conf.set(YarnConfiguration.NM_LOG_DIRS, "file:///dev/null");
 
 
-    LinuxContainerExecutor exec;
-    LinuxContainerRuntime linuxContainerRuntime = new
-        DefaultLinuxContainerRuntime(PrivilegedOperationExecutor.getInstance
-        (conf));
+      LinuxContainerExecutor exec;
+      LinuxContainerRuntime linuxContainerRuntime = new
+          DefaultLinuxContainerRuntime(PrivilegedOperationExecutor.getInstance(
+              conf));
 
-    linuxContainerRuntime.initialize(conf);
-    exec = new LinuxContainerExecutor(linuxContainerRuntime);
+      linuxContainerRuntime.initialize(conf);
+      exec = new LinuxContainerExecutor(linuxContainerRuntime);
 
-    mockExec = spy(exec);
-    doAnswer(
-        new Answer() {
-          @Override
-          public Object answer(InvocationOnMock invocationOnMock)
-              throws Throwable {
-             String diagnostics = (String) invocationOnMock.getArguments()[0];
-            assertTrue("Invalid Diagnostics message: " + diagnostics,
-                diagnostics.contains("badcommand"));
-            return null;
+      mockExec = spy(exec);
+      doAnswer(
+          new Answer() {
+            @Override
+            public Object answer(InvocationOnMock invocationOnMock)
+                throws Throwable {
+              String diagnostics = (String) invocationOnMock.getArguments()[0];
+              assertTrue("Invalid Diagnostics message: " + diagnostics,
+                  diagnostics.contains(expecetedMessage[j]));
+              return null;
+            }
           }
-        }
-    ).when(mockExec).logOutput(any(String.class));
-    dirsHandler = new LocalDirsHandlerService();
-    dirsHandler.init(conf);
-    mockExec.setConf(conf);
+      ).when(mockExec).logOutput(any(String.class));
+      dirsHandler = new LocalDirsHandlerService();
+      dirsHandler.init(conf);
+      mockExec.setConf(conf);
 
-    String appSubmitter = "nobody";
-    String cmd = String
-        .valueOf(PrivilegedOperation.RunAsUserCommand.LAUNCH_CONTAINER.getValue());
-    String appId = "APP_ID";
-    String containerId = "CONTAINER_ID";
-    Container container = mock(Container.class);
-    ContainerId cId = mock(ContainerId.class);
-    ContainerLaunchContext context = mock(ContainerLaunchContext.class);
-    HashMap<String, String> env = new HashMap<String, String>();
+      String appSubmitter = "nobody";
+      String cmd = String
+          .valueOf(PrivilegedOperation.RunAsUserCommand.LAUNCH_CONTAINER.
+              getValue());
+      String appId = "APP_ID";
+      String containerId = "CONTAINER_ID";
+      Container container = mock(Container.class);
+      ContainerId cId = mock(ContainerId.class);
+      ContainerLaunchContext context = mock(ContainerLaunchContext.class);
+      HashMap<String, String> env = new HashMap<String, String>();
 
-    when(container.getContainerId()).thenReturn(cId);
-    when(container.getLaunchContext()).thenReturn(context);
-    doAnswer(
-        new Answer() {
-          @Override
-          public Object answer(InvocationOnMock invocationOnMock)
-              throws Throwable {
-            ContainerDiagnosticsUpdateEvent event =
-                (ContainerDiagnosticsUpdateEvent) invocationOnMock
-                    .getArguments()[0];
-            assertTrue("Invalid Diagnostics message: " +
-                event.getDiagnosticsUpdate(),
-                event.getDiagnosticsUpdate().contains("badcommand"));
-            return null;
+      when(container.getContainerId()).thenReturn(cId);
+      when(container.getLaunchContext()).thenReturn(context);
+      doAnswer(
+          new Answer() {
+            @Override
+            public Object answer(InvocationOnMock invocationOnMock)
+                throws Throwable {
+              ContainerDiagnosticsUpdateEvent event =
+                  (ContainerDiagnosticsUpdateEvent) invocationOnMock
+                      .getArguments()[0];
+              assertTrue("Invalid Diagnostics message: " +
+                      event.getDiagnosticsUpdate(),
+                  event.getDiagnosticsUpdate().contains(expecetedMessage[j]));
+              return null;
+            }
           }
-        }
-    ).when(container).handle(any(ContainerDiagnosticsUpdateEvent.class));
-    
-    when(cId.toString()).thenReturn(containerId);
+      ).when(container).handle(any(ContainerDiagnosticsUpdateEvent.class));
 
-    when(context.getEnvironment()).thenReturn(env);
+      when(cId.toString()).thenReturn(containerId);
 
-    Path scriptPath = new Path("file:///bin/echo");
-    Path tokensPath = new Path("file:///dev/null");
-    Path workDir = new Path("/tmp");
-    Path pidFile = new Path(workDir, "pid.txt");
+      when(context.getEnvironment()).thenReturn(env);
 
-    mockExec.activateContainer(cId, pidFile);
+      Path scriptPath = new Path("file:///bin/echo");
+      Path tokensPath = new Path("file:///dev/null");
+      Path workDir = new Path("/tmp");
+      Path pidFile = new Path(workDir, "pid.txt");
 
-    int ret = mockExec.launchContainer(new ContainerStartContext.Builder()
-        .setContainer(container)
-        .setNmPrivateContainerScriptPath(scriptPath)
-        .setNmPrivateTokensPath(tokensPath)
-        .setUser(appSubmitter)
-        .setAppId(appId)
-        .setContainerWorkDir(workDir)
-        .setLocalDirs(dirsHandler.getLocalDirs())
-        .setLogDirs(dirsHandler.getLogDirs())
-        .build());
+      mockExec.activateContainer(cId, pidFile);
 
-    Assert.assertNotSame(0, ret);
-    assertEquals(Arrays.asList(YarnConfiguration.DEFAULT_NM_NONSECURE_MODE_LOCAL_USER,
-        appSubmitter, cmd, appId, containerId,
-        workDir.toString(), "/bin/echo", "/dev/null", pidFile.toString(),
-        StringUtils.join(PrivilegedOperation.LINUX_FILE_PATH_SEPARATOR,
-            dirsHandler.getLocalDirs()),
-        StringUtils.join(PrivilegedOperation.LINUX_FILE_PATH_SEPARATOR,
-            dirsHandler.getLogDirs()),
-        "cgroups=none"), readMockParams());
+      try {
+        int ret = mockExec.launchContainer(new ContainerStartContext.Builder()
+            .setContainer(container)
+            .setNmPrivateContainerScriptPath(scriptPath)
+            .setNmPrivateTokensPath(tokensPath)
+            .setUser(appSubmitter)
+            .setAppId(appId)
+            .setContainerWorkDir(workDir)
+            .setLocalDirs(dirsHandler.getLocalDirs())
+            .setLogDirs(dirsHandler.getLogDirs())
+            .setFilecacheDirs(new ArrayList<>())
+            .setUserLocalDirs(new ArrayList<>())
+            .setContainerLocalDirs(new ArrayList<>())
+            .setContainerLogDirs(new ArrayList<>())
+            .build());
 
+        Assert.assertNotSame(0, ret);
+        assertEquals(Arrays.asList(YarnConfiguration.
+                DEFAULT_NM_NONSECURE_MODE_LOCAL_USER,
+            appSubmitter, cmd, appId, containerId,
+            workDir.toString(), "/bin/echo", "/dev/null", pidFile.toString(),
+            StringUtils.join(PrivilegedOperation.LINUX_FILE_PATH_SEPARATOR,
+                dirsHandler.getLocalDirs()),
+            StringUtils.join(PrivilegedOperation.LINUX_FILE_PATH_SEPARATOR,
+                dirsHandler.getLogDirs()),
+            "cgroups=none"), readMockParams());
+
+        assertNotEquals("Expected YarnRuntimeException",
+            MOCK_EXECUTOR_WITH_CONFIG_ERROR, executor[i]);
+      } catch (ConfigurationException ex) {
+        assertEquals(MOCK_EXECUTOR_WITH_CONFIG_ERROR, executor[i]);
+        Assert.assertEquals("Linux Container Executor reached unrecoverable " +
+            "exception", ex.getMessage());
+      }
+    }
   }
   
   @Test
@@ -479,5 +521,88 @@ public class TestLinuxContainerExecutorWithMocks {
     assertEquals(Arrays.asList(YarnConfiguration.DEFAULT_NM_NONSECURE_MODE_LOCAL_USER,
         appSubmitter, cmd, "", baseDir0.toString(), baseDir1.toString()),
         readMockParams());
+  }
+
+  @Test
+  public void testNoExitCodeFromPrivilegedOperation() throws Exception {
+    Configuration conf = new Configuration();
+    final PrivilegedOperationExecutor spyPrivilegedExecutor =
+        spy(PrivilegedOperationExecutor.getInstance(conf));
+    doThrow(new PrivilegedOperationException("interrupted"))
+        .when(spyPrivilegedExecutor).executePrivilegedOperation(
+            any(List.class), any(PrivilegedOperation.class),
+            any(File.class), any(Map.class), anyBoolean(), anyBoolean());
+    LinuxContainerRuntime runtime = new DefaultLinuxContainerRuntime(
+        spyPrivilegedExecutor);
+    runtime.initialize(conf);
+    mockExec = new LinuxContainerExecutor(runtime);
+    mockExec.setConf(conf);
+    LinuxContainerExecutor lce = new LinuxContainerExecutor(runtime) {
+      @Override
+      protected PrivilegedOperationExecutor getPrivilegedOperationExecutor() {
+        return spyPrivilegedExecutor;
+      }
+    };
+    lce.setConf(conf);
+    InetSocketAddress address = InetSocketAddress.createUnresolved(
+        "localhost", 8040);
+    Path nmPrivateCTokensPath= new Path("file:///bin/nmPrivateCTokensPath");
+    LocalDirsHandlerService dirService = new LocalDirsHandlerService();
+    dirService.init(conf);
+
+    String appSubmitter = "nobody";
+    ApplicationId appId = ApplicationId.newInstance(1, 1);
+    ApplicationAttemptId attemptId = ApplicationAttemptId.newInstance(appId, 1);
+    ContainerId cid = ContainerId.newContainerId(attemptId, 1);
+    HashMap<String, String> env = new HashMap<>();
+    Container container = mock(Container.class);
+    ContainerLaunchContext context = mock(ContainerLaunchContext.class);
+    when(container.getContainerId()).thenReturn(cid);
+    when(container.getLaunchContext()).thenReturn(context);
+    when(context.getEnvironment()).thenReturn(env);
+    Path workDir = new Path("/tmp");
+
+    try {
+      lce.startLocalizer(new LocalizerStartContext.Builder()
+          .setNmPrivateContainerTokens(nmPrivateCTokensPath)
+          .setNmAddr(address)
+          .setUser(appSubmitter)
+          .setAppId(appId.toString())
+          .setLocId("12345")
+          .setDirsHandler(dirService)
+          .build());
+      Assert.fail("startLocalizer should have thrown an exception");
+    } catch (IOException e) {
+      assertTrue("Unexpected exception " + e,
+          e.getMessage().contains("exitCode"));
+    }
+
+    lce.activateContainer(cid, new Path(workDir, "pid.txt"));
+    lce.launchContainer(new ContainerStartContext.Builder()
+        .setContainer(container)
+        .setNmPrivateContainerScriptPath(new Path("file:///bin/echo"))
+        .setNmPrivateTokensPath(new Path("file:///dev/null"))
+        .setUser(appSubmitter)
+        .setAppId(appId.toString())
+        .setContainerWorkDir(workDir)
+        .setLocalDirs(dirsHandler.getLocalDirs())
+        .setLogDirs(dirsHandler.getLogDirs())
+        .setFilecacheDirs(new ArrayList<>())
+        .setUserLocalDirs(new ArrayList<>())
+        .setContainerLocalDirs(new ArrayList<>())
+        .setContainerLogDirs(new ArrayList<>())
+        .build());
+    lce.deleteAsUser(new DeletionAsUserContext.Builder()
+        .setUser(appSubmitter)
+        .setSubDir(new Path("/tmp/testdir"))
+        .build());
+
+    try {
+      lce.mountCgroups(new ArrayList<String>(), "hierarchy");
+      Assert.fail("mountCgroups should have thrown an exception");
+    } catch (IOException e) {
+      assertTrue("Unexpected exception " + e,
+          e.getMessage().contains("exit code"));
+    }
   }
 }

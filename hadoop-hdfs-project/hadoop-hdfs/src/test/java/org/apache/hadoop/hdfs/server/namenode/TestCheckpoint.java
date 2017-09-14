@@ -44,7 +44,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
-import com.google.common.io.Files;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -509,8 +508,8 @@ public class TestCheckpoint {
       Mockito.reset(faultInjector);
       secondary.shutdown(); // secondary namenode crash!
 
-      // start new instance of secondary and verify that 
-      // a new rollEditLog suceedes inspite of the fact that 
+      // start new instance of secondary and verify that
+      // a new rollEditLog succeeds inspite of the fact that
       // edits.new already exists.
       //
       secondary = startSecondaryNameNode(conf);
@@ -1030,6 +1029,7 @@ public class TestCheckpoint {
    */
   @Test
   public void testCheckpoint() throws IOException {
+    Path tmpDir = new Path("/tmp_tmp");
     Path file1 = new Path("checkpoint.dat");
     Path file2 = new Path("checkpoint2.dat");
     Configuration conf = new HdfsConfiguration();
@@ -1057,6 +1057,11 @@ public class TestCheckpoint {
           replication, seed);
       checkFile(fileSys, file1, replication);
 
+      for(int i=0; i < 1000; i++) {
+        fileSys.mkdirs(tmpDir);
+        fileSys.delete(tmpDir, true);
+      }
+
       //
       // Take a checkpoint
       //
@@ -1081,7 +1086,6 @@ public class TestCheckpoint {
     //
     // Restart cluster and verify that file1 still exist.
     //
-    Path tmpDir = new Path("/tmp_tmp");
     try {
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDatanodes)
           .format(false).build();
@@ -1360,9 +1364,9 @@ public class TestCheckpoint {
       Configuration snConf1 = new HdfsConfiguration(cluster.getConfiguration(0));
       Configuration snConf2 = new HdfsConfiguration(cluster.getConfiguration(1));
       InetSocketAddress nn1RpcAddress = cluster.getNameNode(0)
-          .getNameNodeAddress();
+          .getServiceRpcAddress();
       InetSocketAddress nn2RpcAddress = cluster.getNameNode(1)
-          .getNameNodeAddress();
+          .getServiceRpcAddress();
       String nn1 = nn1RpcAddress.getHostName() + ":" + nn1RpcAddress.getPort();
       String nn2 = nn2RpcAddress.getHostName() + ":" + nn2RpcAddress.getPort();
 
@@ -1919,6 +1923,7 @@ public class TestCheckpoint {
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0)
           .format(true).build();
       int origPort = cluster.getNameNodePort();
+      int origServicePort = cluster.getNameNodeServicePort();
       int origHttpPort = cluster.getNameNode().getHttpAddress().getPort();
       Configuration snnConf = new Configuration(conf);
       File checkpointDir = new File(MiniDFSCluster.getBaseDirectory(),
@@ -1945,6 +1950,7 @@ public class TestCheckpoint {
       cluster = new MiniDFSCluster.Builder(conf)
           .numDataNodes(0)
           .nameNodePort(origPort)
+          .nameNodeServicePort(origServicePort)
           .nameNodeHttpPort(origHttpPort)
           .format(true).build();
 
@@ -2431,7 +2437,8 @@ public class TestCheckpoint {
   public void testLegacyOivImage() throws Exception {
     MiniDFSCluster cluster = null;
     SecondaryNameNode secondary = null;
-    File tmpDir = Files.createTempDir();
+    File tmpDir = GenericTestUtils.getTestDir("testLegacyOivImage");
+    tmpDir.mkdirs();
     Configuration conf = new HdfsConfiguration();
     conf.set(DFSConfigKeys.DFS_NAMENODE_LEGACY_OIV_IMAGE_DIR_KEY,
         tmpDir.getAbsolutePath());

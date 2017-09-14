@@ -66,6 +66,8 @@ import org.apache.hadoop.yarn.api.records.NodeReport;
 import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
+import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceTypeInfo;
 import org.apache.hadoop.yarn.api.records.SignalContainerCommand;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.api.records.YarnClusterMetrics;
@@ -349,6 +351,16 @@ public class ResourceMgrDelegate extends YarnClient {
   }
 
   @Override
+  public List<ApplicationReport> getApplications(
+      Set<String> applicationTypes,
+      EnumSet<YarnApplicationState> applicationStates,
+      Set<String> applicationTags)
+      throws YarnException, IOException {
+    return client.getApplications(
+        applicationTypes, applicationStates, applicationTags);
+  }
+
+  @Override
   public List<ApplicationReport> getApplications(Set<String> queues,
       Set<String> users, Set<String> applicationTypes,
       EnumSet<YarnApplicationState> applicationStates) throws YarnException,
@@ -466,19 +478,19 @@ public class ResourceMgrDelegate extends YarnClient {
     return client.listReservations(request);
   }
   @Override
-  public Map<NodeId, Set<NodeLabel>> getNodeToLabels() throws YarnException,
+  public Map<NodeId, Set<String>> getNodeToLabels() throws YarnException,
       IOException {
     return client.getNodeToLabels();
   }
 
   @Override
-  public Map<NodeLabel, Set<NodeId>> getLabelsToNodes() throws YarnException,
+  public Map<String, Set<NodeId>> getLabelsToNodes() throws YarnException,
       IOException {
     return client.getLabelsToNodes();
   }
 
   @Override
-  public Map<NodeLabel, Set<NodeId>> getLabelsToNodes(Set<String> labels)
+  public Map<String, Set<NodeId>> getLabelsToNodes(Set<String> labels)
       throws YarnException, IOException {
     return client.getLabelsToNodes(labels);
   }
@@ -500,5 +512,29 @@ public class ResourceMgrDelegate extends YarnClient {
       SignalContainerCommand command)
       throws YarnException, IOException {
     client.signalToContainer(containerId, command);
+  }
+
+  @Override
+  public void killApplication(ApplicationId appId, String diagnostics)
+      throws YarnException, IOException {
+    client.killApplication(appId, diagnostics);
+  }
+
+  @Override
+  public Map<String, Resource> getResourceProfiles()
+      throws YarnException, IOException {
+    return client.getResourceProfiles();
+  }
+
+  @Override
+  public Resource getResourceProfile(String profile)
+      throws YarnException, IOException {
+    return client.getResourceProfile(profile);
+  }
+
+  @Override
+  public List<ResourceTypeInfo> getResourceTypeInfo()
+      throws YarnException, IOException {
+    return client.getResourceTypeInfo();
   }
 }

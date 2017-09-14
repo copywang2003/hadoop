@@ -19,6 +19,8 @@ package org.apache.hadoop.hdfs.server.namenode;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
@@ -31,11 +33,15 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.EnumSet;
 
+import org.apache.hadoop.hdfs.StripedFileTestUtil;
 import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.SystemErasureCodingPolicies;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
+import org.apache.hadoop.hdfs.protocolPB.PBHelperClient;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoStriped;
+import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.junit.Assert;
 
@@ -52,13 +58,13 @@ import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.hdfs.StripedFileTestUtil;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream.SyncFlag;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.BlockUCState;
 import org.apache.hadoop.hdfs.server.namenode.LeaseManager.Lease;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection;
 import org.apache.hadoop.hdfs.util.MD5FileUtils;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.PathUtils;
@@ -71,8 +77,9 @@ public class TestFSImage {
 
   private static final String HADOOP_2_7_ZER0_BLOCK_SIZE_TGZ =
       "image-with-zero-block-size.tar.gz";
-  private static final ErasureCodingPolicy testECPolicy
-      = ErasureCodingPolicyManager.getSystemDefaultPolicy();
+  private static final ErasureCodingPolicy testECPolicy =
+      SystemErasureCodingPolicies.getByID(
+          SystemErasureCodingPolicies.RS_10_4_POLICY_ID);
 
   @Test
   public void testPersist() throws IOException {
@@ -84,8 +91,15 @@ public class TestFSImage {
   public void testCompression() throws IOException {
     Configuration conf = new Configuration();
     conf.setBoolean(DFSConfigKeys.DFS_IMAGE_COMPRESS_KEY, true);
-    conf.set(DFSConfigKeys.DFS_IMAGE_COMPRESSION_CODEC_KEY,
-        "org.apache.hadoop.io.compress.GzipCodec");
+    setCompressCodec(conf, "org.apache.hadoop.io.compress.DefaultCodec");
+    setCompressCodec(conf, "org.apache.hadoop.io.compress.GzipCodec");
+    setCompressCodec(conf, "org.apache.hadoop.io.compress.BZip2Codec");
+    setCompressCodec(conf, "org.apache.hadoop.io.compress.Lz4Codec");
+  }
+
+  private void setCompressCodec(Configuration conf, String compressCodec)
+      throws IOException {
+    conf.set(DFSConfigKeys.DFS_IMAGE_COMPRESSION_CODEC_KEY, compressCodec);
     testPersistHelper(conf);
   }
 
@@ -142,37 +156,38 @@ public class TestFSImage {
 
   private void testSaveAndLoadStripedINodeFile(FSNamesystem fsn, Configuration conf,
                                                boolean isUC) throws IOException{
-    // contruct a INode with StripedBlock for saving and loading
-    fsn.setErasureCodingPolicy("/", testECPolicy, false);
+    // Construct an INode with StripedBlock for saving and loading
+    fsn.setErasureCodingPolicy("/", testECPolicy.getName(), false);
     long id = 123456789;
     byte[] name = "testSaveAndLoadInodeFile_testfile".getBytes();
     PermissionStatus permissionStatus = new PermissionStatus("testuser_a",
             "testuser_groups", new FsPermission((short)0x755));
     long mtime = 1426222916-3600;
     long atime = 1426222916;
-    BlockInfoContiguous[] blks = new BlockInfoContiguous[0];
-    short replication = testECPolicy.getId();
+    BlockInfoContiguous[] blocks = new BlockInfoContiguous[0];
+    byte erasureCodingPolicyID = testECPolicy.getId();
     long preferredBlockSize = 128*1024*1024;
     INodeFile file = new INodeFile(id, name, permissionStatus, mtime, atime,
-        blks, replication, preferredBlockSize, (byte) 0, true);
+        blocks, null, erasureCodingPolicyID, preferredBlockSize,
+        (byte) 0, BlockType.STRIPED);
     ByteArrayOutputStream bs = new ByteArrayOutputStream();
 
-    //construct StripedBlocks for the INode
-    BlockInfoStriped[] stripedBlks = new BlockInfoStriped[3];
+    // Construct StripedBlocks for the INode
+    BlockInfoStriped[] stripedBlocks = new BlockInfoStriped[3];
     long stripedBlkId = 10000001;
     long timestamp = mtime+3600;
-    for (int i = 0; i < stripedBlks.length; i++) {
-      stripedBlks[i] = new BlockInfoStriped(
+    for (int i = 0; i < stripedBlocks.length; i++) {
+      stripedBlocks[i] = new BlockInfoStriped(
               new Block(stripedBlkId + i, preferredBlockSize, timestamp),
               testECPolicy);
-      file.addBlock(stripedBlks[i]);
+      file.addBlock(stripedBlocks[i]);
     }
 
     final String client = "testClient";
     final String clientMachine = "testClientMachine";
     final String path = "testUnderConstructionPath";
 
-    //save the INode to byte array
+    // Save the INode to byte array
     DataOutput out = new DataOutputStream(bs);
     if (isUC) {
       file.toUnderConstruction(client, clientMachine);
@@ -209,6 +224,7 @@ public class TestFSImage {
     // blocks to/from legacy fsimage
     assertEquals(3, fileByLoaded.getBlocks().length);
     assertEquals(preferredBlockSize, fileByLoaded.getPreferredBlockSize());
+    assertEquals(file.getFileReplication(), fileByLoaded.getFileReplication());
 
     if (isUC) {
       assertEquals(client,
@@ -229,6 +245,7 @@ public class TestFSImage {
     try {
       cluster = new MiniDFSCluster.Builder(conf).build();
       cluster.waitActive();
+      DFSTestUtil.enableAllECPolicies(cluster.getFileSystem());
       testSaveAndLoadStripedINodeFile(cluster.getNamesystem(), conf, false);
     } finally {
       if (cluster != null) {
@@ -249,6 +266,7 @@ public class TestFSImage {
     try {
       cluster = new MiniDFSCluster.Builder(conf).build();
       cluster.waitActive();
+      DFSTestUtil.enableAllECPolicies(cluster.getFileSystem());
       testSaveAndLoadStripedINodeFile(cluster.getNamesystem(), conf, true);
     } finally {
       if (cluster != null) {
@@ -437,8 +455,8 @@ public class TestFSImage {
   /**
    * Ensure that FSImage supports BlockGroup.
    */
-  @Test
-  public void testSupportBlockGroup() throws IOException {
+  @Test(timeout = 60000)
+  public void testSupportBlockGroup() throws Exception {
     final short GROUP_SIZE = (short) (testECPolicy.getNumDataUnits() +
         testECPolicy.getNumParityUnits());
     final int BLOCK_SIZE = 8 * 1024 * 1024;
@@ -450,32 +468,87 @@ public class TestFSImage {
           .build();
       cluster.waitActive();
       DistributedFileSystem fs = cluster.getFileSystem();
-      fs.getClient().getNamenode().setErasureCodingPolicy("/", testECPolicy);
-      Path file = new Path("/striped");
-      FSDataOutputStream out = fs.create(file);
-      byte[] bytes = DFSTestUtil.generateSequentialBytes(0, BLOCK_SIZE);
-      out.write(bytes);
-      out.close();
+      DFSTestUtil.enableAllECPolicies(fs);
+      Path parentDir = new Path("/ec-10-4");
+      Path childDir = new Path(parentDir, "ec-3-2");
+      ErasureCodingPolicy ec32Policy = SystemErasureCodingPolicies
+          .getByID(SystemErasureCodingPolicies.RS_3_2_POLICY_ID);
 
+      // Create directories and files
+      fs.mkdirs(parentDir);
+      fs.mkdirs(childDir);
+      fs.setErasureCodingPolicy(parentDir, testECPolicy.getName());
+      fs.setErasureCodingPolicy(childDir, ec32Policy.getName());
+      Path file_10_4 = new Path(parentDir, "striped_file_10_4");
+      Path file_3_2 = new Path(childDir, "striped_file_3_2");
+
+      // Write content to files
+      byte[] bytes = StripedFileTestUtil.generateBytes(BLOCK_SIZE);
+      DFSTestUtil.writeFile(fs, file_10_4, new String(bytes));
+      DFSTestUtil.writeFile(fs, file_3_2, new String(bytes));
+
+      // Save namespace and restart NameNode
       fs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
       fs.saveNamespace();
       fs.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
 
       cluster.restartNameNodes();
       fs = cluster.getFileSystem();
-      assertTrue(fs.exists(file));
+      assertTrue(fs.exists(file_10_4));
+      assertTrue(fs.exists(file_3_2));
 
-      // check the information of striped blocks
+      // check the information of file_10_4
       FSNamesystem fsn = cluster.getNamesystem();
-      INodeFile inode = fsn.dir.getINode(file.toString()).asFile();
+      INodeFile inode = fsn.dir.getINode(file_10_4.toString()).asFile();
       assertTrue(inode.isStriped());
+      assertEquals(testECPolicy.getId(), inode.getErasureCodingPolicyID());
       BlockInfo[] blks = inode.getBlocks();
       assertEquals(1, blks.length);
       assertTrue(blks[0].isStriped());
+      assertEquals(testECPolicy.getId(),
+          fs.getErasureCodingPolicy(file_10_4).getId());
+      assertEquals(testECPolicy.getId(),
+          ((BlockInfoStriped)blks[0]).getErasureCodingPolicy().getId());
       assertEquals(testECPolicy.getNumDataUnits(),
           ((BlockInfoStriped) blks[0]).getDataBlockNum());
       assertEquals(testECPolicy.getNumParityUnits(),
           ((BlockInfoStriped) blks[0]).getParityBlockNum());
+      byte[] content = DFSTestUtil.readFileAsBytes(fs, file_10_4);
+      assertArrayEquals(bytes, content);
+
+
+      // check the information of file_3_2
+      inode = fsn.dir.getINode(file_3_2.toString()).asFile();
+      assertTrue(inode.isStriped());
+      assertEquals(SystemErasureCodingPolicies.getByID(
+          SystemErasureCodingPolicies.RS_3_2_POLICY_ID).getId(),
+          inode.getErasureCodingPolicyID());
+      blks = inode.getBlocks();
+      assertEquals(1, blks.length);
+      assertTrue(blks[0].isStriped());
+      assertEquals(ec32Policy.getId(),
+          fs.getErasureCodingPolicy(file_3_2).getId());
+      assertEquals(ec32Policy.getNumDataUnits(),
+          ((BlockInfoStriped) blks[0]).getDataBlockNum());
+      assertEquals(ec32Policy.getNumParityUnits(),
+          ((BlockInfoStriped) blks[0]).getParityBlockNum());
+      content = DFSTestUtil.readFileAsBytes(fs, file_3_2);
+      assertArrayEquals(bytes, content);
+
+      // check the EC policy on parent Dir
+      ErasureCodingPolicy ecPolicy =
+          fsn.getErasureCodingPolicy(parentDir.toString());
+      assertNotNull(ecPolicy);
+      assertEquals(testECPolicy.getId(), ecPolicy.getId());
+
+      // check the EC policy on child Dir
+      ecPolicy = fsn.getErasureCodingPolicy(childDir.toString());
+      assertNotNull(ecPolicy);
+      assertEquals(ec32Policy.getId(), ecPolicy.getId());
+
+      // check the EC policy on root directory
+      ecPolicy = fsn.getErasureCodingPolicy("/");
+      assertNull(ecPolicy);
     } finally {
       if (cluster != null) {
         cluster.shutdown();
@@ -634,6 +707,103 @@ public class TestFSImage {
 
       cluster.shutdown();
       cluster = null;
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
+  @Test
+  public void testBlockTypeProtoDefaultsToContiguous() throws Exception {
+    INodeSection.INodeFile.Builder builder = INodeSection.INodeFile
+        .newBuilder();
+    INodeSection.INodeFile inodeFile = builder.build();
+    BlockType defaultBlockType = PBHelperClient.convert(inodeFile
+        .getBlockType());
+    assertEquals(defaultBlockType, BlockType.CONTIGUOUS);
+  }
+
+  /**
+   * Test if a INodeFile under a replication EC policy directory
+   * can be saved by FSImageSerialization and loaded by FSImageFormat#Loader.
+   */
+  @Test
+  public void testSaveAndLoadFileUnderReplicationPolicyDir()
+      throws IOException {
+    Configuration conf = new Configuration();
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).build();
+      cluster.waitActive();
+      FSNamesystem fsn = cluster.getNamesystem();
+      DistributedFileSystem fs = cluster.getFileSystem();
+      DFSTestUtil.enableAllECPolicies(fs);
+      ErasureCodingPolicy replicaPolicy =
+          SystemErasureCodingPolicies.getReplicationPolicy();
+      ErasureCodingPolicy defaultEcPolicy =
+          StripedFileTestUtil.getDefaultECPolicy();
+
+      final Path ecDir = new Path("/ec");
+      final Path replicaDir = new Path(ecDir, "replica");
+      final Path replicaFile1 = new Path(replicaDir, "f1");
+      final Path replicaFile2 = new Path(replicaDir, "f2");
+
+      // create root directory
+      fs.mkdir(ecDir, null);
+      fs.setErasureCodingPolicy(ecDir, defaultEcPolicy.getName());
+
+      // create directory, and set replication Policy
+      fs.mkdir(replicaDir, null);
+      fs.setErasureCodingPolicy(replicaDir, replicaPolicy.getName());
+
+      // create an empty file f1
+      fs.create(replicaFile1).close();
+
+      // create an under-construction file f2
+      FSDataOutputStream out = fs.create(replicaFile2, (short) 2);
+      out.writeBytes("hello");
+      ((DFSOutputStream) out.getWrappedStream()).hsync(EnumSet
+          .of(SyncFlag.UPDATE_LENGTH));
+
+      // checkpoint
+      fs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
+      fs.saveNamespace();
+      fs.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
+
+      cluster.restartNameNode();
+      cluster.waitActive();
+      fs = cluster.getFileSystem();
+
+      assertTrue(fs.getFileStatus(ecDir).isDirectory());
+      assertTrue(fs.getFileStatus(replicaDir).isDirectory());
+      assertTrue(fs.exists(replicaFile1));
+      assertTrue(fs.exists(replicaFile2));
+
+      // check directories
+      assertEquals("Directory should have default EC policy.",
+          defaultEcPolicy, fs.getErasureCodingPolicy(ecDir));
+      assertEquals("Directory should hide replication EC policy.",
+          null, fs.getErasureCodingPolicy(replicaDir));
+
+      // check file1
+      assertEquals("File should not have EC policy.", null,
+          fs.getErasureCodingPolicy(replicaFile1));
+      // check internals of file2
+      INodeFile file2Node =
+          fsn.dir.getINode4Write(replicaFile2.toString()).asFile();
+      assertEquals("hello".length(), file2Node.computeFileSize());
+      assertTrue(file2Node.isUnderConstruction());
+      BlockInfo[] blks = file2Node.getBlocks();
+      assertEquals(1, blks.length);
+      assertEquals(BlockUCState.UNDER_CONSTRUCTION, blks[0].getBlockUCState());
+      assertEquals("File should return expected replication factor.",
+          2, blks[0].getReplication());
+      assertEquals("File should not have EC policy.", null,
+          fs.getErasureCodingPolicy(replicaFile2));
+      // check lease manager
+      Lease lease = fsn.leaseManager.getLease(file2Node);
+      Assert.assertNotNull(lease);
     } finally {
       if (cluster != null) {
         cluster.shutdown();

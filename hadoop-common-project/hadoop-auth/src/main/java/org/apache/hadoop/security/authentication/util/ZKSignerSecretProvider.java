@@ -16,6 +16,7 @@ package org.apache.hadoop.security.authentication.util;
 import com.google.common.annotations.VisibleForTesting;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
+import java.security.SecureRandom;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -149,7 +150,7 @@ public class ZKSignerSecretProvider extends RolloverSignerSecretProvider {
 
   public ZKSignerSecretProvider() {
     super();
-    rand = new Random();
+    rand = new SecureRandom();
   }
 
   /**
@@ -258,7 +259,7 @@ public class ZKSignerSecretProvider extends RolloverSignerSecretProvider {
     } catch (KeeperException.BadVersionException bve) {
       LOG.debug("Unable to push to znode; another server already did it");
     } catch (Exception ex) {
-      LOG.error("An unexpected exception occured pushing data to ZooKeeper",
+      LOG.error("An unexpected exception occurred pushing data to ZooKeeper",
               ex);
     }
   }
@@ -342,8 +343,11 @@ public class ZKSignerSecretProvider extends RolloverSignerSecretProvider {
     }
   }
 
-  private byte[] generateRandomSecret() {
-    return Long.toString(rand.nextLong()).getBytes(Charset.forName("UTF-8"));
+  @VisibleForTesting
+  protected byte[] generateRandomSecret() {
+    byte[] secret = new byte[32]; // 32 bytes = 256 bits
+    rand.nextBytes(secret);
+    return secret;
   }
 
   /**
@@ -436,6 +440,8 @@ public class ZKSignerSecretProvider extends RolloverSignerSecretProvider {
   @InterfaceAudience.Private
   public static class JaasConfiguration extends Configuration {
 
+    private final javax.security.auth.login.Configuration baseConfig =
+        javax.security.auth.login.Configuration.getConfiguration();
     private static AppConfigurationEntry[] entry;
     private String entryName;
 
@@ -468,7 +474,8 @@ public class ZKSignerSecretProvider extends RolloverSignerSecretProvider {
 
     @Override
     public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
-      return (entryName.equals(name)) ? entry : null;
+      return (entryName.equals(name)) ? entry : ((baseConfig != null)
+        ? baseConfig.getAppConfigurationEntry(name) : null);
     }
 
     private String getKrb5LoginModuleName() {

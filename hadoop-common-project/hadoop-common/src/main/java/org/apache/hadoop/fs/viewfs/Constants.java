@@ -57,7 +57,13 @@ public interface Constants {
    * Config variable for specifying a merge link
    */
   public static final String CONFIG_VIEWFS_LINK_MERGE = "linkMerge";
-  
+
+  /**
+   * Config variable for specifying an nfly link. Nfly writes to multiple
+   * locations, and allows reads from the closest one.
+   */
+  String CONFIG_VIEWFS_LINK_NFLY = "linkNfly";
+
   /**
    * Config variable for specifying a merge of the root of the mount-table
    *  with the root of another file system. 
@@ -66,4 +72,6 @@ public interface Constants {
 
   static public final FsPermission PERMISSION_555 =
       new FsPermission((short) 0555);
+
+  String CONFIG_VIEWFS_RENAME_STRATEGY = "fs.viewfs.rename.strategy";
 }

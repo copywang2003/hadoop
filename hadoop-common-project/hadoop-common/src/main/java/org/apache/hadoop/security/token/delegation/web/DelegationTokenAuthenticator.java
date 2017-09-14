@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.security.token.delegation.web;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.security.SecurityUtil;
@@ -29,7 +30,6 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenIdentifier;
 import org.apache.hadoop.util.HttpExceptionUtils;
 import org.apache.hadoop.util.StringUtils;
-import org.codehaus.jackson.map.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -74,7 +74,7 @@ public abstract class DelegationTokenAuthenticator implements Authenticator {
    * DelegationToken operations.
    */
   @InterfaceAudience.Private
-  public static enum DelegationTokenOperation {
+  public enum DelegationTokenOperation {
     GETDELEGATIONTOKEN(HTTP_GET, true),
     RENEWDELEGATIONTOKEN(HTTP_PUT, true),
     CANCELDELEGATIONTOKEN(HTTP_PUT, false);
@@ -115,10 +115,16 @@ public abstract class DelegationTokenAuthenticator implements Authenticator {
     if (token instanceof DelegationTokenAuthenticatedURL.Token) {
       hasDt = ((DelegationTokenAuthenticatedURL.Token) token).
           getDelegationToken() != null;
+      if (hasDt) {
+        LOG.trace("Delegation token found: {}",
+            ((DelegationTokenAuthenticatedURL.Token) token)
+                .getDelegationToken());
+      }
     }
     if (!hasDt) {
       String queryStr = url.getQuery();
       hasDt = (queryStr != null) && queryStr.contains(DELEGATION_PARAM + "=");
+      LOG.trace("hasDt={}, queryStr={}", hasDt, queryStr);
     }
     return hasDt;
   }
@@ -129,7 +135,12 @@ public abstract class DelegationTokenAuthenticator implements Authenticator {
     if (!hasDelegationToken(url, token)) {
       // check and renew TGT to handle potential expiration
       UserGroupInformation.getCurrentUser().checkTGTAndReloginFromKeytab();
+      LOG.debug("No delegation token found for url={}, token={}, authenticating"
+          + " with {}", url, token, authenticator.getClass());
       authenticator.authenticate(url, token);
+    } else {
+      LOG.debug("Authenticated from delegation token. url={}, token={}",
+          url, token);
     }
   }
 

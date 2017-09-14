@@ -18,12 +18,14 @@
 
 package org.apache.hadoop.fs.http.server;
 
+import com.google.common.base.Charsets;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.XAttrCodec;
 import org.apache.hadoop.fs.XAttrSetFlag;
 import org.apache.hadoop.fs.http.client.HttpFSFileSystem;
+import org.apache.hadoop.fs.http.client.HttpFSUtils;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.AccessTimeParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.AclPermissionParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.BlockSizeParam;
@@ -35,17 +37,22 @@ import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.LenParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.ModifiedTimeParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.NewLengthParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OffsetParam;
+import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OldSnapshotNameParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OperationParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OverwriteParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OwnerParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.PermissionParam;
+import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.PolicyNameParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.RecursiveParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.ReplicationParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.SourcesParam;
+import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.SnapshotNameParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.XAttrEncodingParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.XAttrNameParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.XAttrSetFlagParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.XAttrValueParam;
+import org.apache.hadoop.hdfs.web.JsonUtil;
+import org.apache.hadoop.http.JettyUtils;
 import org.apache.hadoop.lib.service.FileSystemAccess;
 import org.apache.hadoop.lib.service.FileSystemAccessException;
 import org.apache.hadoop.lib.service.Groups;
@@ -166,7 +173,7 @@ public class HttpFSServer {
    * {@link HttpFSExceptionProvider}.
    */
   @GET
-  @Produces(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8)
   public Response getRoot(@QueryParam(OperationParam.NAME) OperationParam op,
                           @Context Parameters params,
                           @Context HttpServletRequest request)
@@ -195,7 +202,8 @@ public class HttpFSServer {
    */
   @GET
   @Path("{path:.*}")
-  @Produces({MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_JSON})
+  @Produces({MediaType.APPLICATION_OCTET_STREAM + "; " + JettyUtils.UTF_8,
+      MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8})
   public Response get(@PathParam("path") String path,
                       @QueryParam(OperationParam.NAME) OperationParam op,
                       @Context Parameters params,
@@ -291,7 +299,25 @@ public class HttpFSServer {
       break;
     }
     case GETFILEBLOCKLOCATIONS: {
-      response = Response.status(Response.Status.BAD_REQUEST).build();
+      long offset = 0;
+      // In case length is not given, reset to max long
+      // in order to retrieve all file block locations
+      long len = Long.MAX_VALUE;
+      Long offsetParam = params.get(OffsetParam.NAME, OffsetParam.class);
+      Long lenParam = params.get(LenParam.NAME, LenParam.class);
+      AUDIT_LOG.info("[{}] offset [{}] len [{}]",
+          new Object[] {path, offsetParam, lenParam});
+      if (offsetParam != null && offsetParam.longValue() > 0) {
+        offset = offsetParam.longValue();
+      }
+      if (lenParam != null && lenParam.longValue() > 0) {
+        len = lenParam.longValue();
+      }
+      FSOperations.FSFileBlockLocations command =
+          new FSOperations.FSFileBlockLocations(path, offset, len);
+      @SuppressWarnings("rawtypes") Map locations = fsExecute(user, command);
+      final String json = JsonUtil.toJsonString("BlockLocations", locations);
+      response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
       break;
     }
     case GETACLSTATUS: {
@@ -317,6 +343,44 @@ public class HttpFSServer {
       FSOperations.FSListXAttrs command = new FSOperations.FSListXAttrs(path);
       @SuppressWarnings("rawtypes") Map json = fsExecute(user, command);
       AUDIT_LOG.info("XAttr names for [{}]", path);
+      response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
+      break;
+    }
+    case LISTSTATUS_BATCH: {
+      String startAfter = params.get(
+          HttpFSParametersProvider.StartAfterParam.NAME,
+          HttpFSParametersProvider.StartAfterParam.class);
+      byte[] token = HttpFSUtils.EMPTY_BYTES;
+      if (startAfter != null) {
+        token = startAfter.getBytes(Charsets.UTF_8);
+      }
+      FSOperations.FSListStatusBatch command = new FSOperations
+          .FSListStatusBatch(path, token);
+      @SuppressWarnings("rawtypes") Map json = fsExecute(user, command);
+      AUDIT_LOG.info("[{}] token [{}]", path, token);
+      response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
+      break;
+    }
+    case GETTRASHROOT: {
+      FSOperations.FSTrashRoot command = new FSOperations.FSTrashRoot(path);
+      JSONObject json = fsExecute(user, command);
+      AUDIT_LOG.info("[{}]", path);
+      response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
+      break;
+    }
+    case GETALLSTORAGEPOLICY: {
+      FSOperations.FSGetAllStoragePolicies command =
+          new FSOperations.FSGetAllStoragePolicies();
+      JSONObject json = fsExecute(user, command);
+      AUDIT_LOG.info("[{}]", path);
+      response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
+      break;
+    }
+    case GETSTORAGEPOLICY: {
+      FSOperations.FSGetStoragePolicy command =
+          new FSOperations.FSGetStoragePolicy(path);
+      JSONObject json = fsExecute(user, command);
+      AUDIT_LOG.info("[{}]", path);
       response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
       break;
     }
@@ -346,7 +410,7 @@ public class HttpFSServer {
    */
   @DELETE
   @Path("{path:.*}")
-  @Produces(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8)
   public Response delete(@PathParam("path") String path,
                          @QueryParam(OperationParam.NAME) OperationParam op,
                          @Context Parameters params,
@@ -366,6 +430,16 @@ public class HttpFSServer {
           new FSOperations.FSDelete(path, recursive);
         JSONObject json = fsExecute(user, command);
         response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
+        break;
+      }
+      case DELETESNAPSHOT: {
+        String snapshotName = params.get(SnapshotNameParam.NAME,
+            SnapshotNameParam.class);
+        FSOperations.FSDeleteSnapshot command =
+                new FSOperations.FSDeleteSnapshot(path, snapshotName);
+        fsExecute(user, command);
+        AUDIT_LOG.info("[{}] deleted snapshot [{}]", path, snapshotName);
+        response = Response.ok().build();
         break;
       }
       default: {
@@ -397,7 +471,7 @@ public class HttpFSServer {
   @POST
   @Path("{path:.*}")
   @Consumes({"*/*"})
-  @Produces({MediaType.APPLICATION_JSON})
+  @Produces({MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8})
   public Response post(InputStream is,
                        @Context UriInfo uriInfo,
                        @PathParam("path") String path,
@@ -447,6 +521,14 @@ public class HttpFSServer {
         response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
         break;
       }
+      case UNSETSTORAGEPOLICY: {
+        FSOperations.FSUnsetStoragePolicy command =
+             new FSOperations.FSUnsetStoragePolicy(path);
+         fsExecute(user, command);
+         AUDIT_LOG.info("Unset storage policy [{}]", path);
+         response = Response.ok().build();
+         break;
+      }
       default: {
         throw new IOException(
           MessageFormat.format("Invalid HTTP POST operation [{0}]",
@@ -492,7 +574,7 @@ public class HttpFSServer {
   @PUT
   @Path("{path:.*}")
   @Consumes({"*/*"})
-  @Produces({MediaType.APPLICATION_JSON})
+  @Produces({MediaType.APPLICATION_JSON + "; " + JettyUtils.UTF_8})
   public Response put(InputStream is,
                        @Context UriInfo uriInfo,
                        @PathParam("path") String path,
@@ -532,6 +614,16 @@ public class HttpFSServer {
         }
         break;
       }
+      case CREATESNAPSHOT: {
+        String snapshotName = params.get(SnapshotNameParam.NAME,
+            SnapshotNameParam.class);
+        FSOperations.FSCreateSnapshot command =
+            new FSOperations.FSCreateSnapshot(path, snapshotName);
+        String json = fsExecute(user, command);
+        AUDIT_LOG.info("[{}] snapshot created as [{}]", path, snapshotName);
+        response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
+        break;
+      }
       case SETXATTR: {
         String xattrName = params.get(XAttrNameParam.NAME, 
             XAttrNameParam.class);
@@ -544,6 +636,20 @@ public class HttpFSServer {
             path, xattrName, xattrValue, flag);
         fsExecute(user, command);
         AUDIT_LOG.info("[{}] to xAttr [{}]", path, xattrName);
+        response = Response.ok().build();
+        break;
+      }
+      case RENAMESNAPSHOT: {
+        String oldSnapshotName = params.get(OldSnapshotNameParam.NAME,
+            OldSnapshotNameParam.class);
+        String snapshotName = params.get(SnapshotNameParam.NAME,
+            SnapshotNameParam.class);
+        FSOperations.FSRenameSnapshot command =
+                new FSOperations.FSRenameSnapshot(path, oldSnapshotName,
+                    snapshotName);
+        fsExecute(user, command);
+        AUDIT_LOG.info("[{}] renamed snapshot [{}] to [{}]", path,
+            oldSnapshotName, snapshotName);
         response = Response.ok().build();
         break;
       }
@@ -661,6 +767,16 @@ public class HttpFSServer {
                 new FSOperations.FSRemoveDefaultAcl(path);
         fsExecute(user, command);
         AUDIT_LOG.info("[{}] remove default acl", path);
+        response = Response.ok().build();
+        break;
+      }
+      case SETSTORAGEPOLICY: {
+        String policyName = params.get(PolicyNameParam.NAME,
+            PolicyNameParam.class);
+        FSOperations.FSSetStoragePolicy command =
+            new FSOperations.FSSetStoragePolicy(path, policyName);
+        fsExecute(user, command);
+        AUDIT_LOG.info("[{}] to policy [{}]", path, policyName);
         response = Response.ok().build();
         break;
       }

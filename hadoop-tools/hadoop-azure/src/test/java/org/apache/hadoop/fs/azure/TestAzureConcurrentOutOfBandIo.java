@@ -40,9 +40,9 @@ public class TestAzureConcurrentOutOfBandIo {
   static final int BLOB_SIZE = 32 * 1024 * 1024;
 
   // Number of blocks to be written before flush.
-  private static final int NUMBER_OF_BLOCKS = 2;
+  static final int NUMBER_OF_BLOCKS = 2;
 
-  private AzureBlobStorageTestAccount testAccount;
+  protected AzureBlobStorageTestAccount testAccount;
 
   // Overridden TestCase methods.
   @Before
@@ -107,7 +107,8 @@ public class TestAzureConcurrentOutOfBandIo {
           //
           outputStream = writerStorageAccount.getStore().storefile(
               key,
-              new PermissionStatus("", "", FsPermission.getDefault()));
+              new PermissionStatus("", "", FsPermission.getDefault()),
+              key);
 
           Arrays.fill(dataBlockWrite, (byte) (i % 256));
           for (int j = 0; j < NUMBER_OF_BLOCKS; j++) {
@@ -141,7 +142,8 @@ public class TestAzureConcurrentOutOfBandIo {
    // reading.  This eliminates the race between the reader and writer threads.
    OutputStream outputStream = testAccount.getStore().storefile(
        "WASB_String.txt",
-       new PermissionStatus("", "", FsPermission.getDefault()));
+       new PermissionStatus("", "", FsPermission.getDefault()),
+           "WASB_String.txt");
    Arrays.fill(dataBlockWrite, (byte) 255);
    for (int i = 0; i < NUMBER_OF_BLOCKS; i++) {
      outputStream.write(dataBlockWrite);
@@ -155,7 +157,7 @@ public class TestAzureConcurrentOutOfBandIo {
         "WASB_String.txt");
    writeBlockTask.startWriting();
    int count = 0;
-   DataInputStream inputStream = null;
+   InputStream inputStream = null;
 
    for (int i = 0; i < 5; i++) {
      try {

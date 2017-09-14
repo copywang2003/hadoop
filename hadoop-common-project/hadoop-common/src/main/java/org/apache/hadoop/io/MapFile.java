@@ -23,8 +23,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
@@ -37,6 +35,11 @@ import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.util.Options;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_MAP_INDEX_SKIP_DEFAULT;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_MAP_INDEX_SKIP_KEY;
 
 /** A file-based map from keys to values.
  * 
@@ -57,7 +60,7 @@ import org.apache.hadoop.util.ReflectionUtils;
 @InterfaceAudience.Public
 @InterfaceStability.Stable
 public class MapFile {
-  private static final Log LOG = LogFactory.getLog(MapFile.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MapFile.class);
 
   /** The name of the index file. */
   public static final String INDEX_FILE_NAME = "index";
@@ -395,7 +398,8 @@ public class MapFile {
         Options.getOption(ComparatorOption.class, opts);
       WritableComparator comparator =
         comparatorOption == null ? null : comparatorOption.getValue();
-      INDEX_SKIP = conf.getInt("io.map.index.skip", 0);
+      INDEX_SKIP = conf.getInt(
+          IO_MAP_INDEX_SKIP_KEY, IO_MAP_INDEX_SKIP_DEFAULT);
       open(dir, comparator, conf, opts);
     }
  
@@ -990,15 +994,15 @@ public class MapFile {
             reader.getKeyClass().asSubclass(WritableComparable.class),
             reader.getValueClass());
 
-      WritableComparable key = ReflectionUtils.newInstance(reader.getKeyClass()
-        .asSubclass(WritableComparable.class), conf);
+      WritableComparable<?> key = ReflectionUtils.newInstance(
+          reader.getKeyClass().asSubclass(WritableComparable.class), conf);
       Writable value = ReflectionUtils.newInstance(reader.getValueClass()
         .asSubclass(Writable.class), conf);
 
       while (reader.next(key, value))               // copy all entries
         writer.append(key, value);
     } finally {
-      IOUtils.cleanup(LOG, writer, reader);
+      IOUtils.cleanupWithLogger(LOG, writer, reader);
     }
   }
 }

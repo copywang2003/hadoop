@@ -86,9 +86,9 @@ class AclCommands extends FsCommand {
           (perm.getOtherAction().implies(FsAction.EXECUTE) ? "t" : "T"));
       }
 
-      AclStatus aclStatus = null;
-      List<AclEntry> entries = null;
-      if (perm.getAclBit()) {
+      final AclStatus aclStatus;
+      final List<AclEntry> entries;
+      if (item.stat.hasAcl()) {
         aclStatus = item.fs.getAclStatus(item.path);
         entries = aclStatus.getEntries();
       } else {
@@ -117,7 +117,7 @@ class AclCommands extends FsCommand {
       }
       if (AclUtil.isMinimalAcl(entries)) {
         for (AclEntry entry: entries) {
-          out.println(entry);
+          out.println(entry.toStringStable());
         }
       } else {
         for (AclEntry entry: entries) {
@@ -145,10 +145,10 @@ class AclCommands extends FsCommand {
           out.println(String.format("%s\t#effective:%s", entry,
             effectivePerm.SYMBOL));
         } else {
-          out.println(entry);
+          out.println(entry.toStringStable());
         }
       } else {
-        out.println(entry);
+        out.println(entry.toStringStable());
       }
     }
   }
@@ -213,6 +213,10 @@ class AclCommands extends FsCommand {
               "Missing either <acl_spec> or <path>");
         }
         aclEntries = AclEntry.parseAclSpec(args.removeFirst(), !cf.getOpt("x"));
+        if (aclEntries.isEmpty()) {
+          throw new HadoopIllegalArgumentException(
+              "Missing <acl_spec> entry");
+        }
       }
 
       if (args.isEmpty()) {

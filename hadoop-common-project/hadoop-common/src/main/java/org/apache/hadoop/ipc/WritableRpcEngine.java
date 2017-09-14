@@ -28,8 +28,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.net.SocketFactory;
 
-import org.apache.commons.logging.*;
-
 import org.apache.hadoop.io.*;
 import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.ipc.Client.ConnectionId;
@@ -43,11 +41,14 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.*;
 import org.apache.htrace.core.TraceScope;
 import org.apache.htrace.core.Tracer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** An RpcEngine implementation for Writable data. */
 @InterfaceStability.Evolving
+@Deprecated
 public class WritableRpcEngine implements RpcEngine {
-  private static final Log LOG = LogFactory.getLog(RPC.class);
+  private static final Logger LOG = LoggerFactory.getLogger(RPC.class);
   
   //writableRpcVersion should be updated if there is a change
   //in format of the rpc messages.
@@ -331,6 +332,7 @@ public class WritableRpcEngine implements RpcEngine {
 
 
   /** An RPC Server. */
+  @Deprecated
   public static class Server extends RPC.Server {
     /** 
      * Construct an RPC server.
@@ -443,7 +445,8 @@ public class WritableRpcEngine implements RpcEngine {
         value = value.substring(0, 55)+"...";
       LOG.info(value);
     }
-    
+
+    @Deprecated
     static class WritableRpcInvoker implements RpcInvoker {
 
      @Override
@@ -549,7 +552,8 @@ public class WritableRpcEngine implements RpcEngine {
           String detailedMetricsName = (exception == null) ?
               call.getMethodName() :
               exception.getClass().getSimpleName();
-          server.updateMetrics(detailedMetricsName, qTime, processingTime);
+          server
+              .updateMetrics(detailedMetricsName, qTime, processingTime, false);
         }
       }
     }

@@ -53,7 +53,6 @@ import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.util.ClassUtil;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.Tool;
-import org.apache.log4j.Level;
 
 /** 
  * A map/reduce job configuration.
@@ -333,7 +332,7 @@ public class JobConf extends Configuration {
   private Credentials credentials = new Credentials();
   
   /**
-   * Configuration key to set the logging {@link Level} for the map task.
+   * Configuration key to set the logging level for the map task.
    *
    * The allowed logging levels are:
    * OFF, FATAL, ERROR, WARN, INFO, DEBUG, TRACE and ALL.
@@ -342,7 +341,7 @@ public class JobConf extends Configuration {
     JobContext.MAP_LOG_LEVEL;
   
   /**
-   * Configuration key to set the logging {@link Level} for the reduce task.
+   * Configuration key to set the logging level for the reduce task.
    *
    * The allowed logging levels are:
    * OFF, FATAL, ERROR, WARN, INFO, DEBUG, TRACE and ALL.
@@ -353,7 +352,7 @@ public class JobConf extends Configuration {
   /**
    * Default logging level for map/reduce tasks.
    */
-  public static final Level DEFAULT_LOG_LEVEL = Level.INFO;
+  public static final String DEFAULT_LOG_LEVEL = JobContext.DEFAULT_LOG_LEVEL;
 
   /**
    * The variable is kept for M/R 1.x applications, M/R 2.x applications should
@@ -1286,10 +1285,10 @@ public class JobConf extends Configuration {
   }
 
   /**
-   * Get configured the number of reduce tasks for this job.
+   * Get the configured number of map tasks for this job.
    * Defaults to <code>1</code>.
    * 
-   * @return the number of reduce tasks for this job.
+   * @return the number of map tasks for this job.
    */
   public int getNumMapTasks() { return getInt(JobContext.NUM_MAPS, 1); }
   
@@ -1318,7 +1317,7 @@ public class JobConf extends Configuration {
    * bytes, of input files. However, the {@link FileSystem} blocksize of the 
    * input files is treated as an upper bound for input splits. A lower bound 
    * on the split size can be set via 
-   * <a href="{@docRoot}/../mapred-default.html#mapreduce.input.fileinputformat.split.minsize">
+   * <a href="{@docRoot}/../hadoop-mapreduce-client/hadoop-mapreduce-client-core/mapred-default.xml#mapreduce.input.fileinputformat.split.minsize">
    * mapreduce.input.fileinputformat.split.minsize</a>.</p>
    *  
    * <p>Thus, if you expect 10TB of input data and have a blocksize of 128MB, 
@@ -1334,9 +1333,9 @@ public class JobConf extends Configuration {
   public void setNumMapTasks(int n) { setInt(JobContext.NUM_MAPS, n); }
 
   /**
-   * Get configured the number of reduce tasks for this job. Defaults to 
+   * Get the configured number of reduce tasks for this job. Defaults to
    * <code>1</code>.
-   * 
+   *
    * @return the number of reduce tasks for this job.
    */
   public int getNumReduceTasks() { return getInt(JobContext.NUM_REDUCES, 1); }
@@ -1347,9 +1346,14 @@ public class JobConf extends Configuration {
    * <b id="NoOfReduces">How many reduces?</b>
    * 
    * <p>The right number of reduces seems to be <code>0.95</code> or 
-   * <code>1.75</code> multiplied by (&lt;<i>no. of nodes</i>&gt; * 
-   * <a href="{@docRoot}/../mapred-default.html#mapreduce.tasktracker.reduce.tasks.maximum">
-   * mapreduce.tasktracker.reduce.tasks.maximum</a>).
+   * <code>1.75</code> multiplied by (
+   * <i>available memory for reduce tasks</i>
+   * (The value of this should be smaller than
+   * numNodes * yarn.nodemanager.resource.memory-mb
+   * since the resource of memory is shared by map tasks and other
+   * applications) /
+   * <a href="{@docRoot}/../hadoop-mapreduce-client/hadoop-mapreduce-client-core/mapred-default.xml#mapreduce.reduce.memory.mb">
+   * mapreduce.reduce.memory.mb</a>).
    * </p>
    * 
    * <p>With <code>0.95</code> all of the reduces can launch immediately and 

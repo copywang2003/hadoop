@@ -21,11 +21,12 @@ import com.google.common.base.Preconditions;
 
 import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.fs.permission.FsAction;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
-import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.protocol.SnapshotException;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -47,18 +48,17 @@ import static org.apache.hadoop.util.Time.now;
  */
 class FSDirConcatOp {
 
-  static HdfsFileStatus concat(FSDirectory fsd, String target, String[] srcs,
+  static FileStatus concat(FSDirectory fsd, String target, String[] srcs,
     boolean logRetryCache) throws IOException {
     validatePath(target, srcs);
     assert srcs != null;
     if (FSDirectory.LOG.isDebugEnabled()) {
       FSDirectory.LOG.debug("concat {} to {}", Arrays.toString(srcs), target);
     }
-    final INodesInPath targetIIP = fsd.getINodesInPath4Write(target);
+    FSPermissionChecker pc = fsd.getPermissionChecker();
+    final INodesInPath targetIIP = fsd.resolvePath(pc, target, DirOp.WRITE);
     // write permission for the target
-    FSPermissionChecker pc = null;
     if (fsd.isPermissionEnabled()) {
-      pc = fsd.getPermissionChecker();
       fsd.checkPathAccess(pc, targetIIP, FsAction.WRITE);
     }
 
@@ -125,7 +125,7 @@ class FSDirConcatOp {
     final INodeDirectory targetParent = targetINode.getParent();
     // now check the srcs
     for(String src : srcs) {
-      final INodesInPath iip = fsd.getINodesInPath4Write(src);
+      final INodesInPath iip = fsd.resolvePath(pc, src, DirOp.WRITE);
       // permission check for srcs
       if (pc != null) {
         fsd.checkPathAccess(pc, iip, FsAction.READ); // read the file

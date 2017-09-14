@@ -28,6 +28,7 @@ import static org.junit.Assert.assertTrue;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
@@ -44,6 +45,7 @@ import org.apache.commons.io.FileUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.DF;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.StorageType;
@@ -52,14 +54,20 @@ import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.MiniDFSNNTopology;
+import org.apache.hadoop.hdfs.server.datanode.checker.VolumeCheckResult;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.DataNodeVolumeMetrics;
+import org.apache.hadoop.util.AutoCloseableLock;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
+import org.apache.hadoop.hdfs.server.datanode.DirectoryScanner.ReportCompiler;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi.FsVolumeReferences;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeReference;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsVolumeSpi;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetTestUtil;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsVolumeImpl;
 import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.LazyPersistTestCase;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -113,10 +121,10 @@ public class TestDirectoryScanner {
 
   /** Truncate a block file */
   private long truncateBlockFile() throws IOException {
-    synchronized (fds) {
+    try(AutoCloseableLock lock = fds.acquireDatasetLock()) {
       for (ReplicaInfo b : FsDatasetTestUtil.getReplicas(fds, bpid)) {
-        File f = b.getBlockFile();
-        File mf = b.getMetaFile();
+        File f = new File(b.getBlockURI());
+        File mf = new File(b.getMetadataURI());
         // Truncate a block file that has a corresponding metadata file
         if (f.exists() && f.length() != 0 && mf.exists()) {
           FileOutputStream s = null;
@@ -138,10 +146,10 @@ public class TestDirectoryScanner {
 
   /** Delete a block file */
   private long deleteBlockFile() {
-    synchronized(fds) {
+    try(AutoCloseableLock lock = fds.acquireDatasetLock()) {
       for (ReplicaInfo b : FsDatasetTestUtil.getReplicas(fds, bpid)) {
-        File f = b.getBlockFile();
-        File mf = b.getMetaFile();
+        File f = new File(b.getBlockURI());
+        File mf = new File(b.getMetadataURI());
         // Delete a block file that has corresponding metadata file
         if (f.exists() && mf.exists() && f.delete()) {
           LOG.info("Deleting block file " + f.getAbsolutePath());
@@ -154,12 +162,11 @@ public class TestDirectoryScanner {
 
   /** Delete block meta file */
   private long deleteMetaFile() {
-    synchronized(fds) {
+    try(AutoCloseableLock lock = fds.acquireDatasetLock()) {
       for (ReplicaInfo b : FsDatasetTestUtil.getReplicas(fds, bpid)) {
-        File file = b.getMetaFile();
         // Delete a metadata file
-        if (file.exists() && file.delete()) {
-          LOG.info("Deleting metadata file " + file.getAbsolutePath());
+        if (b.metadataExists() && b.deleteMetadata()) {
+          LOG.info("Deleting metadata " + b.getMetadataURI());
           return b.getBlockId();
         }
       }
@@ -173,7 +180,7 @@ public class TestDirectoryScanner {
    * @throws IOException
    */
   private void duplicateBlock(long blockId) throws IOException {
-    synchronized (fds) {
+    try(AutoCloseableLock lock = fds.acquireDatasetLock()) {
       ReplicaInfo b = FsDatasetTestUtil.fetchReplicaInfo(fds, bpid, blockId);
       try (FsDatasetSpi.FsVolumeReferences volumes =
           fds.getFsVolumeReferences()) {
@@ -183,20 +190,22 @@ public class TestDirectoryScanner {
           }
 
           // Volume without a copy of the block. Make a copy now.
-          File sourceBlock = b.getBlockFile();
-          File sourceMeta = b.getMetaFile();
-          String sourceRoot = b.getVolume().getBasePath();
-          String destRoot = v.getBasePath();
+          File sourceBlock = new File(b.getBlockURI());
+          File sourceMeta = new File(b.getMetadataURI());
+          URI sourceRoot = b.getVolume().getStorageLocation().getUri();
+          URI destRoot = v.getStorageLocation().getUri();
 
           String relativeBlockPath =
-              new File(sourceRoot).toURI().relativize(sourceBlock.toURI())
+              sourceRoot.relativize(sourceBlock.toURI())
                   .getPath();
           String relativeMetaPath =
-              new File(sourceRoot).toURI().relativize(sourceMeta.toURI())
+              sourceRoot.relativize(sourceMeta.toURI())
                   .getPath();
 
-          File destBlock = new File(destRoot, relativeBlockPath);
-          File destMeta = new File(destRoot, relativeMetaPath);
+          File destBlock = new File(new File(destRoot).toString(),
+              relativeBlockPath);
+          File destMeta = new File(new File(destRoot).toString(),
+              relativeMetaPath);
 
           destBlock.getParentFile().mkdirs();
           FileUtils.copyFile(sourceBlock, destBlock);
@@ -238,7 +247,8 @@ public class TestDirectoryScanner {
     try (FsDatasetSpi.FsVolumeReferences volumes = fds.getFsVolumeReferences()) {
       int numVolumes = volumes.size();
       int index = rand.nextInt(numVolumes - 1);
-      File finalizedDir = volumes.get(index).getFinalizedDir(bpid);
+      File finalizedDir = ((FsVolumeImpl) volumes.get(index))
+          .getFinalizedDir(bpid);
       File file = new File(finalizedDir, getBlockFile(id));
       if (file.createNewFile()) {
         LOG.info("Created block file " + file.getName());
@@ -253,8 +263,8 @@ public class TestDirectoryScanner {
     try (FsDatasetSpi.FsVolumeReferences refs = fds.getFsVolumeReferences()) {
       int numVolumes = refs.size();
       int index = rand.nextInt(numVolumes - 1);
-
-      File finalizedDir = refs.get(index).getFinalizedDir(bpid);
+      File finalizedDir = ((FsVolumeImpl) refs.get(index))
+          .getFinalizedDir(bpid);
       File file = new File(finalizedDir, getMetaFile(id));
       if (file.createNewFile()) {
         LOG.info("Created metafile " + file.getName());
@@ -271,7 +281,8 @@ public class TestDirectoryScanner {
       int numVolumes = refs.size();
       int index = rand.nextInt(numVolumes - 1);
 
-      File finalizedDir = refs.get(index).getFinalizedDir(bpid);
+      File finalizedDir =
+          ((FsVolumeImpl) refs.get(index)).getFinalizedDir(bpid);
       File file = new File(finalizedDir, getBlockFile(id));
       if (file.createNewFile()) {
         LOG.info("Created block file " + file.getName());
@@ -306,15 +317,22 @@ public class TestDirectoryScanner {
          missingMemoryBlocks, mismatchBlocks, 0);
   }
 
-    private void scan(long totalBlocks, int diffsize, long missingMetaFile, long missingBlockFile,
-      long missingMemoryBlocks, long mismatchBlocks, long duplicateBlocks) throws IOException {
+  private void scan(long totalBlocks, int diffsize, long missingMetaFile,
+      long missingBlockFile, long missingMemoryBlocks, long mismatchBlocks,
+      long duplicateBlocks) throws IOException {
     scanner.reconcile();
-    
+    verifyStats(totalBlocks, diffsize, missingMetaFile, missingBlockFile,
+        missingMemoryBlocks, mismatchBlocks, duplicateBlocks);
+  }
+
+  private void verifyStats(long totalBlocks, int diffsize, long missingMetaFile,
+      long missingBlockFile, long missingMemoryBlocks, long mismatchBlocks,
+      long duplicateBlocks) {
     assertTrue(scanner.diffs.containsKey(bpid));
-    LinkedList<DirectoryScanner.ScanInfo> diff = scanner.diffs.get(bpid);
+    LinkedList<FsVolumeSpi.ScanInfo> diff = scanner.diffs.get(bpid);
     assertTrue(scanner.stats.containsKey(bpid));
     DirectoryScanner.Stats stats = scanner.stats.get(bpid);
-    
+
     assertEquals(diffsize, diff.size());
     assertEquals(totalBlocks, stats.totalBlocks);
     assertEquals(missingMetaFile, stats.missingMetaFile);
@@ -581,8 +599,15 @@ public class TestDirectoryScanner {
           100);
       DataNode dataNode = cluster.getDataNodes().get(0);
 
-      createFile(GenericTestUtils.getMethodName(),
-          BLOCK_LENGTH * blocks, false);
+      final int maxBlocksPerFile = (int) DFSConfigKeys
+          .DFS_NAMENODE_MAX_BLOCKS_PER_FILE_DEFAULT;
+      int numBlocksToCreate = blocks;
+      while (numBlocksToCreate > 0) {
+        final int toCreate = Math.min(maxBlocksPerFile, numBlocksToCreate);
+        createFile(GenericTestUtils.getMethodName() + numBlocksToCreate,
+            BLOCK_LENGTH * toCreate, false);
+        numBlocksToCreate -= toCreate;
+      }
 
       float ratio = 0.0f;
       int retries = maxRetries;
@@ -820,17 +845,6 @@ public class TestDirectoryScanner {
       return 0;
     }
     
-    @Override
-    public String getBasePath() {
-      return (new File("/base")).getAbsolutePath();
-    }
-    
-    @Override
-    public String getPath(String bpid) throws IOException {
-      return (new File("/base/current/" + bpid)).getAbsolutePath();
-    }
-
-    @Override
     public File getFinalizedDir(String bpid) throws IOException {
       return new File("/base/current/" + bpid + "/finalized");
     }
@@ -877,6 +891,51 @@ public class TestDirectoryScanner {
     public FsDatasetSpi getDataset() {
       throw new UnsupportedOperationException();
     }
+
+    @Override
+    public StorageLocation getStorageLocation() {
+      return null;
+    }
+
+    @Override
+    public URI getBaseURI() {
+      return (new File("/base")).toURI();
+    }
+
+    @Override
+    public DF getUsageStats(Configuration conf) {
+      return null;
+    }
+
+    @Override
+    public byte[] loadLastPartialChunkChecksum(
+        File blockFile, File metaFile) throws IOException {
+      return null;
+    }
+
+    @Override
+    public LinkedList<ScanInfo> compileReport(String bpid,
+        LinkedList<ScanInfo> report, ReportCompiler reportCompiler)
+        throws InterruptedException, IOException {
+      return null;
+    }
+
+    @Override
+    public FileIoProvider getFileIoProvider() {
+      return null;
+    }
+
+    @Override
+    public DataNodeVolumeMetrics getMetrics() {
+      return null;
+    }
+
+
+    @Override
+    public VolumeCheckResult check(VolumeCheckContext context)
+        throws Exception {
+      return VolumeCheckResult.HEALTHY;
+    }
   }
 
   private final static TestFsVolumeSpi TEST_VOLUME = new TestFsVolumeSpi();
@@ -887,8 +946,8 @@ public class TestDirectoryScanner {
       
   void testScanInfoObject(long blockId, File blockFile, File metaFile)
       throws Exception {
-    DirectoryScanner.ScanInfo scanInfo =
-        new DirectoryScanner.ScanInfo(blockId, blockFile, metaFile, TEST_VOLUME);
+    FsVolumeSpi.ScanInfo scanInfo =
+        new FsVolumeSpi.ScanInfo(blockId, blockFile, metaFile, TEST_VOLUME);
     assertEquals(blockId, scanInfo.getBlockId());
     if (blockFile != null) {
       assertEquals(blockFile.getAbsolutePath(),
@@ -906,8 +965,8 @@ public class TestDirectoryScanner {
   }
   
   void testScanInfoObject(long blockId) throws Exception {
-    DirectoryScanner.ScanInfo scanInfo =
-        new DirectoryScanner.ScanInfo(blockId, null, null, null);
+    FsVolumeSpi.ScanInfo scanInfo =
+        new FsVolumeSpi.ScanInfo(blockId, null, null, null);
     assertEquals(blockId, scanInfo.getBlockId());
     assertNull(scanInfo.getBlockFile());
     assertNull(scanInfo.getMetaFile());
@@ -963,8 +1022,8 @@ public class TestDirectoryScanner {
       List<FsVolumeSpi> volumes = new ArrayList<>();
       Iterator<FsVolumeSpi> iterator = fds.getFsVolumeReferences().iterator();
       while (iterator.hasNext()) {
-        FsVolumeSpi volume = iterator.next();
-        FsVolumeSpi spy = Mockito.spy(volume);
+        FsVolumeImpl volume = (FsVolumeImpl) iterator.next();
+        FsVolumeImpl spy = Mockito.spy(volume);
         Mockito.doThrow(new IOException("Error while getFinalizedDir"))
             .when(spy).getFinalizedDir(volume.getBlockPoolList()[0]);
         volumes.add(spy);
@@ -982,6 +1041,50 @@ public class TestDirectoryScanner {
         scanner = null;
       }
       cluster.shutdown();
+    }
+  }
+
+  @Test
+  public void testDirectoryScannerInFederatedCluster() throws Exception {
+    //Create Federated cluster with two nameservices and one DN
+    try (MiniDFSCluster cluster = new MiniDFSCluster.Builder(CONF)
+        .nnTopology(MiniDFSNNTopology.simpleHAFederatedTopology(2))
+        .numDataNodes(1).build()) {
+      cluster.waitActive();
+      cluster.transitionToActive(1);
+      cluster.transitionToActive(3);
+      DataNode dataNode = cluster.getDataNodes().get(0);
+      fds = DataNodeTestUtils.getFSDataset(cluster.getDataNodes().get(0));
+      //Create one block in first nameservice
+      FileSystem fs = cluster.getFileSystem(1);
+      int bp1Files = 1;
+      writeFile(fs, bp1Files);
+      //Create two blocks in second nameservice
+      FileSystem fs2 = cluster.getFileSystem(3);
+      int bp2Files = 2;
+      writeFile(fs2, bp2Files);
+      //Call the Directory scanner
+      scanner = new DirectoryScanner(dataNode, fds, CONF);
+      scanner.setRetainDiffs(true);
+      scanner.reconcile();
+      //Check blocks in corresponding BP
+      bpid = cluster.getNamesystem(1).getBlockPoolId();
+      verifyStats(bp1Files, 0, 0, 0, 0, 0, 0);
+      bpid = cluster.getNamesystem(3).getBlockPoolId();
+      verifyStats(bp2Files, 0, 0, 0, 0, 0, 0);
+    } finally {
+      if (scanner != null) {
+        scanner.shutdown();
+        scanner = null;
+      }
+    }
+  }
+
+  private void writeFile(FileSystem fs, int numFiles) throws IOException {
+    final String fileName = "/" + GenericTestUtils.getMethodName();
+    final Path filePath = new Path(fileName);
+    for (int i = 0; i < numFiles; i++) {
+      DFSTestUtil.createFile(fs, filePath, 1, (short) 1, 0);
     }
   }
 }

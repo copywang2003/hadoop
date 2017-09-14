@@ -18,10 +18,19 @@
 
 package org.apache.hadoop.fs;
 
-import java.io.*;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.nio.file.AccessDeniedException;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
@@ -43,11 +52,11 @@ import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.nativeio.NativeIO;
-import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A collection of file-processing util methods
@@ -56,7 +65,7 @@ import org.apache.commons.logging.LogFactory;
 @InterfaceStability.Evolving
 public class FileUtil {
 
-  private static final Log LOG = LogFactory.getLog(FileUtil.class);
+  private static final Logger LOG = LoggerFactory.getLogger(FileUtil.class);
 
   /* The error code is defined in winutils to indicate insufficient
    * privilege to create symbolic links. This value need to keep in
@@ -106,8 +115,10 @@ public class FileUtil {
     file.deleteOnExit();
     if (file.isDirectory()) {
       File[] files = file.listFiles();
-      for (File child : files) {
-        fullyDeleteOnExit(child);
+      if (files != null) {
+        for (File child : files) {
+          fullyDeleteOnExit(child);
+        }
       }
     }
   }
@@ -284,8 +295,8 @@ public class FileUtil {
                                         Path dst)
                                         throws IOException {
     if (srcFS == dstFS) {
-      String srcq = src.makeQualified(srcFS).toString() + Path.SEPARATOR;
-      String dstq = dst.makeQualified(dstFS).toString() + Path.SEPARATOR;
+      String srcq = srcFS.makeQualified(src).toString() + Path.SEPARATOR;
+      String dstq = dstFS.makeQualified(dst).toString() + Path.SEPARATOR;
       if (dstq.startsWith(srcq)) {
         if (srcq.length() == dstq.length()) {
           throw new IOException("Cannot copy " + src + " to itself.");
@@ -318,14 +329,15 @@ public class FileUtil {
       return copy(srcFS, srcs[0], dstFS, dst, deleteSource, overwrite, conf);
 
     // Check if dest is directory
-    if (!dstFS.exists(dst)) {
-      throw new IOException("`" + dst +"': specified destination directory " +
-                            "does not exist");
-    } else {
+    try {
       FileStatus sdst = dstFS.getFileStatus(dst);
       if (!sdst.isDirectory())
         throw new IOException("copying multiple files, but last argument `" +
                               dst + "' is not a directory");
+    } catch (FileNotFoundException e) {
+      throw new IOException(
+          "`" + dst + "': specified destination directory " +
+              "does not exist", e);
     }
 
     for (Path src : srcs) {
@@ -473,15 +485,21 @@ public class FileUtil {
 
   private static Path checkDest(String srcName, FileSystem dstFS, Path dst,
       boolean overwrite) throws IOException {
-    if (dstFS.exists(dst)) {
-      FileStatus sdst = dstFS.getFileStatus(dst);
+    FileStatus sdst;
+    try {
+      sdst = dstFS.getFileStatus(dst);
+    } catch (FileNotFoundException e) {
+      sdst = null;
+    }
+    if (null != sdst) {
       if (sdst.isDirectory()) {
         if (null == srcName) {
-          throw new IOException("Target " + dst + " is a directory");
+          throw new PathIsDirectoryException(dst.toString());
         }
         return checkDest(null, dstFS, new Path(dst, srcName), overwrite);
       } else if (!overwrite) {
-        throw new IOException("Target " + dst + " already exists");
+        throw new PathExistsException(dst.toString(),
+            "Target " + dst + " already exists");
       }
     }
     return dst;
@@ -679,7 +697,7 @@ public class FileUtil {
         entry = tis.getNextTarEntry();
       }
     } finally {
-      IOUtils.cleanup(LOG, tis, inputStream);
+      IOUtils.cleanupWithLogger(LOG, tis, inputStream);
     }
   }
 
@@ -1132,9 +1150,14 @@ public class FileUtil {
    * an IOException to be thrown.
    * @param dir directory for which listing should be performed
    * @return list of file names or empty string list
-   * @exception IOException for invalid directory or for a bad disk.
+   * @exception AccessDeniedException for unreadable directory
+   * @exception IOException for invalid directory or for bad disk
    */
   public static String[] list(File dir) throws IOException {
+    if (!canRead(dir)) {
+      throw new AccessDeniedException(dir.toString(), null,
+          FSExceptionMessages.PERMISSION_DENIED);
+    }
     String[] fileNames = dir.list();
     if(fileNames == null) {
       throw new IOException("Invalid directory or I/O error occurred for dir: "
@@ -1209,19 +1232,13 @@ public class FileUtil {
         continue;
       }
       if (classPathEntry.endsWith("*")) {
-        boolean foundWildCardJar = false;
         // Append all jars that match the wildcard
-        Path globPath = new Path(classPathEntry).suffix("{.jar,.JAR}");
-        FileStatus[] wildcardJars = FileContext.getLocalFSFileContext().util()
-          .globStatus(globPath);
-        if (wildcardJars != null) {
-          for (FileStatus wildcardJar: wildcardJars) {
-            foundWildCardJar = true;
-            classPathEntryList.add(wildcardJar.getPath().toUri().toURL()
-              .toExternalForm());
+        List<Path> jars = getJarsInDirectory(classPathEntry);
+        if (!jars.isEmpty()) {
+          for (Path jar: jars) {
+            classPathEntryList.add(jar.toUri().toURL().toExternalForm());
           }
-        }
-        if (!foundWildCardJar) {
+        } else {
           unexpandedWildcardClasspath.append(File.pathSeparator);
           unexpandedWildcardClasspath.append(classPathEntry);
         }
@@ -1270,11 +1287,53 @@ public class FileUtil {
       bos = new BufferedOutputStream(fos);
       jos = new JarOutputStream(bos, jarManifest);
     } finally {
-      IOUtils.cleanup(LOG, jos, bos, fos);
+      IOUtils.cleanupWithLogger(LOG, jos, bos, fos);
     }
     String[] jarCp = {classPathJar.getCanonicalPath(),
                         unexpandedWildcardClasspath.toString()};
     return jarCp;
+  }
+
+  /**
+   * Returns all jars that are in the directory. It is useful in expanding a
+   * wildcard path to return all jars from the directory to use in a classpath.
+   * It operates only on local paths.
+   *
+   * @param path the path to the directory. The path may include the wildcard.
+   * @return the list of jars as URLs, or an empty list if there are no jars, or
+   * the directory does not exist locally
+   */
+  public static List<Path> getJarsInDirectory(String path) {
+    return getJarsInDirectory(path, true);
+  }
+
+  /**
+   * Returns all jars that are in the directory. It is useful in expanding a
+   * wildcard path to return all jars from the directory to use in a classpath.
+   *
+   * @param path the path to the directory. The path may include the wildcard.
+   * @return the list of jars as URLs, or an empty list if there are no jars, or
+   * the directory does not exist
+   */
+  public static List<Path> getJarsInDirectory(String path, boolean useLocal) {
+    List<Path> paths = new ArrayList<>();
+    try {
+      // add the wildcard if it is not provided
+      if (!path.endsWith("*")) {
+        path += File.separator + "*";
+      }
+      Path globPath = new Path(path).suffix("{.jar,.JAR}");
+      FileContext context = useLocal ?
+          FileContext.getLocalFSFileContext() :
+          FileContext.getFileContext(globPath.toUri());
+      FileStatus[] files = context.util().globStatus(globPath);
+      if (files != null) {
+        for (FileStatus file: files) {
+          paths.add(file.getPath());
+        }
+      }
+    } catch (IOException ignore) {} // return the empty list
+    return paths;
   }
 
   public static boolean compareFs(FileSystem srcFs, FileSystem destFs) {

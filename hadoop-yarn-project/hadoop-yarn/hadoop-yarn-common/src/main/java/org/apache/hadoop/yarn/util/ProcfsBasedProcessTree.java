@@ -58,7 +58,7 @@ public class ProcfsBasedProcessTree extends ResourceCalculatorProcessTree {
   private static final String PROCFS = "/proc/";
 
   private static final Pattern PROCFS_STAT_FILE_FORMAT = Pattern.compile(
-      "^([\\d-]+)\\s\\(([^)]+)\\)\\s[^\\s]\\s([\\d-]+)\\s([\\d-]+)\\s" +
+      "^([\\d-]+)\\s\\((.*)\\)\\s[^\\s]\\s([\\d-]+)\\s([\\d-]+)\\s" +
       "([\\d-]+)\\s([\\d-]+\\s){7}(\\d+)\\s(\\d+)\\s([\\d-]+\\s){7}(\\d+)\\s" +
       "(\\d+)(\\s[\\d-]+){15}");
 
@@ -342,12 +342,6 @@ public class ProcfsBasedProcessTree extends ResourceCalculatorProcessTree {
   }
 
   @Override
-  @SuppressWarnings("deprecation")
-  public long getCumulativeVmem(int olderThanAge) {
-    return getVirtualMemorySize(olderThanAge);
-  }
-
-  @Override
   public long getRssMemorySize(int olderThanAge) {
     if (PAGE_SIZE < 0) {
       return UNAVAILABLE;
@@ -366,12 +360,6 @@ public class ProcfsBasedProcessTree extends ResourceCalculatorProcessTree {
       }
     }
     return isAvailable ? totalPages * PAGE_SIZE : UNAVAILABLE; // convert # pages to byte
-  }
-
-  @Override
-  @SuppressWarnings("deprecation")
-  public long getCumulativeRssmem(int olderThanAge) {
-    return getRssMemorySize(olderThanAge);
   }
 
   /**
@@ -406,15 +394,14 @@ public class ProcfsBasedProcessTree extends ResourceCalculatorProcessTree {
                 continue;
               }
 
-              total +=
-                  Math.min(info.sharedDirty, info.pss) + info.privateDirty
-                      + info.privateClean;
+              // Account for anonymous to know the amount of
+              // memory reclaimable by killing the process
+              total += info.anonymous;
+
               if (LOG.isDebugEnabled()) {
                 LOG.debug(" total(" + olderThanAge + "): PID : " + p.getPid()
-                    + ", SharedDirty : " + info.sharedDirty + ", PSS : "
-                    + info.pss + ", Private_Dirty : " + info.privateDirty
-                    + ", Private_Clean : " + info.privateClean + ", total : "
-                    + (total * KB_TO_BYTES));
+                    + ", info : " + info.toString()
+                    + ", total : " + (total * KB_TO_BYTES));
               }
             }
           }
@@ -494,18 +481,21 @@ public class ProcfsBasedProcessTree extends ResourceCalculatorProcessTree {
    * Get the list of all processes in the system.
    */
   private List<String> getProcessList() {
-    String[] processDirs = (new File(procfsDir)).list();
     List<String> processList = new ArrayList<String>();
-
-    for (String dir : processDirs) {
-      Matcher m = numberPattern.matcher(dir);
-      if (!m.matches()) continue;
-      try {
-        if ((new File(procfsDir, dir)).isDirectory()) {
-          processList.add(dir);
+    String[] processDirs = (new File(procfsDir)).list();
+    if (processDirs != null) {
+      for (String dir : processDirs) {
+        Matcher m = numberPattern.matcher(dir);
+        if (!m.matches()) {
+          continue;
         }
-      } catch (SecurityException s) {
-        // skip this process
+        try {
+          if ((new File(procfsDir, dir)).isDirectory()) {
+            processList.add(dir);
+          }
+        } catch (SecurityException s) {
+          // skip this process
+        }
       }
     }
     return processList;
@@ -804,7 +794,10 @@ public class ProcfsBasedProcessTree extends ResourceCalculatorProcessTree {
             if (LOG.isDebugEnabled()) {
               LOG.debug("MemInfo : " + key + " : Value  : " + value);
             }
-            memoryMappingInfo.setMemInfo(key, value);
+
+            if (memoryMappingInfo != null) {
+              memoryMappingInfo.setMemInfo(key, value);
+            }
           }
         } catch (Throwable t) {
           LOG
@@ -877,6 +870,7 @@ public class ProcfsBasedProcessTree extends ResourceCalculatorProcessTree {
     private int sharedDirty;
     private int privateClean;
     private int privateDirty;
+    private int anonymous;
     private int referenced;
     private String regionName;
     private String permission;
@@ -929,6 +923,10 @@ public class ProcfsBasedProcessTree extends ResourceCalculatorProcessTree {
       return referenced;
     }
 
+    public int getAnonymous() {
+      return anonymous;
+    }
+
     public void setMemInfo(String key, String value) {
       MemInfo info = MemInfo.getMemInfoByName(key);
       int val = 0;
@@ -969,6 +967,9 @@ public class ProcfsBasedProcessTree extends ResourceCalculatorProcessTree {
       case REFERENCED:
         referenced = val;
         break;
+      case ANONYMOUS:
+        anonymous = val;
+        break;
       default:
         break;
       }
@@ -999,10 +1000,7 @@ public class ProcfsBasedProcessTree extends ResourceCalculatorProcessTree {
         .append(MemInfo.REFERENCED.name + ":" + this.getReferenced())
         .append(" kB\n");
       sb.append("\t")
-        .append(MemInfo.PRIVATE_DIRTY.name + ":" + this.getPrivateDirty())
-        .append(" kB\n");
-      sb.append("\t")
-        .append(MemInfo.PRIVATE_DIRTY.name + ":" + this.getPrivateDirty())
+        .append(MemInfo.ANONYMOUS.name + ":" + this.getAnonymous())
         .append(" kB\n");
       return sb.toString();
     }

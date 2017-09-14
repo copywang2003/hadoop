@@ -49,7 +49,6 @@ class JNStorage extends Storage {
   private final FileJournalManager fjm;
   private final StorageDirectory sd;
   private StorageState state;
-  
 
   private static final List<Pattern> CURRENT_DIR_PURGE_REGEXES =
       ImmutableList.of(
@@ -58,6 +57,8 @@ class JNStorage extends Storage {
   
   private static final List<Pattern> PAXOS_DIR_PURGE_REGEXES = 
       ImmutableList.of(Pattern.compile("(\\d+)"));
+
+  private static final String STORAGE_EDITS_SYNC = "edits.sync";
 
   /**
    * @param conf Configuration object
@@ -121,6 +122,31 @@ class JNStorage extends Storage {
     return new File(sd.getCurrentDir(), name);
   }
 
+  File getCurrentDir() {
+    return sd.getCurrentDir();
+  }
+
+  /**
+   * Directory {@code edits.sync} temporarily holds the log segments
+   * downloaded through {@link JournalNodeSyncer} before they are moved to
+   * {@code current} directory.
+   *
+   * @return the directory path
+   */
+  File getEditsSyncDir() {
+    return new File(sd.getRoot(), STORAGE_EDITS_SYNC);
+  }
+
+  File getTemporaryEditsFile(long startTxId, long endTxId) {
+    return new File(getEditsSyncDir(), String.format("%s_%019d-%019d",
+            NNStorage.NameNodeFile.EDITS.getName(), startTxId, endTxId));
+  }
+
+  File getFinalizedEditsFile(long startTxId, long endTxId) {
+    return new File(sd.getCurrentDir(), String.format("%s_%019d-%019d",
+            NNStorage.NameNodeFile.EDITS.getName(), startTxId, endTxId));
+  }
+
   /**
    * @return the path for the file which contains persisted data for the
    * paxos-like recovery process for the given log segment.
@@ -180,7 +206,14 @@ class JNStorage extends Storage {
   }
 
   void format(NamespaceInfo nsInfo) throws IOException {
+    unlockAll();
+    try {
+      sd.analyzeStorage(StartupOption.FORMAT, this, true);
+    } finally {
+      sd.unlock();
+    }
     setStorageInfo(nsInfo);
+
     LOG.info("Formatting journal " + sd + " with nsid: " + getNamespaceID());
     // Unlock the directory before formatting, because we will
     // re-analyze it after format(). The analyzeStorage() call

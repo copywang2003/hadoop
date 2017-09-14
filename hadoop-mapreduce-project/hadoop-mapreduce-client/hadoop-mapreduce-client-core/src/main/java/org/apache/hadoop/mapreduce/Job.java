@@ -75,11 +75,11 @@ import org.apache.hadoop.yarn.api.records.ReservationId;
  */
 @InterfaceAudience.Public
 @InterfaceStability.Evolving
-public class Job extends JobContextImpl implements JobContext {  
+public class Job extends JobContextImpl implements JobContext, AutoCloseable {
   private static final Log LOG = LogFactory.getLog(Job.class);
 
   @InterfaceStability.Evolving
-  public static enum JobState {DEFINE, RUNNING};
+  public enum JobState {DEFINE, RUNNING};
   private static final long MAX_JOBSTATUS_AGE = 1000 * 2;
   public static final String OUTPUT_FILTER = "mapreduce.client.output.filter";
   /** Key in mapred-*.xml that sets completionPollInvervalMillis */
@@ -104,7 +104,7 @@ public class Job extends JobContextImpl implements JobContext {
   public static final boolean DEFAULT_USE_WILDCARD_FOR_LIBJARS = true;
 
   @InterfaceStability.Evolving
-  public static enum TaskStatusFilter { NONE, KILLED, FAILED, SUCCEEDED, ALL }
+  public enum TaskStatusFilter { NONE, KILLED, FAILED, SUCCEEDED, ALL }
 
   static {
     ConfigUtil.loadResources();
@@ -323,7 +323,7 @@ public class Job extends JobContextImpl implements JobContext {
       this.status = ugi.doAs(new PrivilegedExceptionAction<JobStatus>() {
         @Override
         public JobStatus run() throws IOException, InterruptedException {
-          return cluster.getClient().getJobStatus(status.getJobID());
+          return cluster.getClient().getJobStatus(getJobID());
         }
       });
     }
@@ -422,7 +422,7 @@ public class Job extends JobContextImpl implements JobContext {
    * The user-specified job name.
    */
   public String getJobName() {
-    if (state == JobState.DEFINE) {
+    if (state == JobState.DEFINE || status == null) {
       return super.getJobName();
     }
     ensureState(JobState.RUNNING);
@@ -1553,4 +1553,15 @@ public class Job extends JobContextImpl implements JobContext {
     this.reservationId = reservationId;
   }
   
+  /**
+   * Close the <code>Job</code>.
+   * @throws IOException if fail to close.
+   */
+  @Override
+  public void close() throws IOException {
+    if (cluster != null) {
+      cluster.close();
+      cluster = null;
+    }
+  }
 }

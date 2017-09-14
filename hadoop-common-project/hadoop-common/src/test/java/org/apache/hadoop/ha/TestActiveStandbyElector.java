@@ -66,7 +66,7 @@ public class TestActiveStandbyElector {
     }
 
     @Override
-    public ZooKeeper getNewZooKeeper() {
+    public ZooKeeper connectToZooKeeper() {
       ++count;
       return mockZK;
     }
@@ -715,6 +715,37 @@ public class TestActiveStandbyElector {
       }
     }
   }
+
+  /**
+   * Test that ACLs are set on parent zNode even if the node already exists.
+   */
+  @Test
+  public void testParentZNodeACLs() throws Exception {
+    KeeperException ke = new KeeperException(Code.NODEEXISTS) {
+      @Override
+      public Code code() {
+        return super.code();
+      }
+    };
+
+    Mockito.when(mockZK.create(Mockito.anyString(), Mockito.eq(new byte[]{}),
+        Mockito.anyListOf(ACL.class),
+        Mockito.eq(CreateMode.PERSISTENT))).thenThrow(ke);
+
+    elector.ensureParentZNode();
+
+    StringBuilder prefix = new StringBuilder();
+    for (String part : ZK_PARENT_NAME.split("/")) {
+      if (part.isEmpty()) continue;
+      prefix.append("/").append(part);
+      if (!"/".equals(prefix.toString())) {
+        Mockito.verify(mockZK).getACL(Mockito.eq(prefix.toString()),
+            Mockito.eq(new Stat()));
+        Mockito.verify(mockZK).setACL(Mockito.eq(prefix.toString()),
+            Mockito.eq(Ids.OPEN_ACL_UNSAFE), Mockito.anyInt());
+      }
+    }
+  }
   
   /**
    * Test for a bug encountered during development of HADOOP-8163:
@@ -749,7 +780,15 @@ public class TestActiveStandbyElector {
     try {
       new ActiveStandbyElector("127.0.0.1", 2000, ZK_PARENT_NAME,
           Ids.OPEN_ACL_UNSAFE, Collections.<ZKAuthInfo> emptyList(), mockApp,
-          CommonConfigurationKeys.HA_FC_ELECTOR_ZK_OP_RETRIES_DEFAULT);
+          CommonConfigurationKeys.HA_FC_ELECTOR_ZK_OP_RETRIES_DEFAULT) {
+
+          @Override
+          protected ZooKeeper createZooKeeper() throws IOException {
+            return Mockito.mock(ZooKeeper.class);
+          }
+      };
+
+
       Assert.fail("Did not throw zookeeper connection loss exceptions!");
     } catch (KeeperException ke) {
       GenericTestUtils.assertExceptionContains( "ConnectionLoss", ke);

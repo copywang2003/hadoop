@@ -32,15 +32,15 @@ import javax.servlet.ServletRequest;
 import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class TestServletFilter extends HttpServerFunctionalTest {
-  static final Log LOG = LogFactory.getLog(HttpServer2.class);
+  static final Logger LOG = LoggerFactory.getLogger(HttpServer2.class);
   static volatile String uri = null; 
 
   /** A very simple filter which record the uri filtered. */
@@ -146,9 +146,11 @@ public class TestServletFilter extends HttpServerFunctionalTest {
   }
   
   static public class ErrorFilter extends SimpleFilter {
+    static final String EXCEPTION_MESSAGE =
+        "Throwing the exception from Filter init";
     @Override
     public void init(FilterConfig arg0) throws ServletException {
-      throw new ServletException("Throwing the exception from Filter init");
+      throw new ServletException(EXCEPTION_MESSAGE);
     }
 
     /** Configuration for the filter */
@@ -174,7 +176,8 @@ public class TestServletFilter extends HttpServerFunctionalTest {
       http.start();
       fail("expecting exception");
     } catch (IOException e) {
-      assertTrue( e.getMessage().contains("Problem in starting http server. Server handlers failed"));
+      assertEquals("Problem starting http server", e.getMessage());
+      assertEquals(ErrorFilter.EXCEPTION_MESSAGE, e.getCause().getMessage());
     }
   }
   

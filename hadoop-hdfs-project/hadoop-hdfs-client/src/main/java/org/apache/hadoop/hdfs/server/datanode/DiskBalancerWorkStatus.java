@@ -20,17 +20,18 @@
 package org.apache.hadoop.hdfs.server.datanode;
 
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.map.SerializationConfig;
-
-import static org.codehaus.jackson.map.type.TypeFactory.defaultInstance;
 
 import java.io.IOException;
 import java.util.List;
 import java.util.LinkedList;
+
+import static com.fasterxml.jackson.databind.type.TypeFactory.defaultInstance;
 
 /**
  * Helper class that reports how much work has has been done by the node.
@@ -38,10 +39,19 @@ import java.util.LinkedList;
 @InterfaceAudience.Private
 @InterfaceStability.Unstable
 public class DiskBalancerWorkStatus {
+  private static final ObjectMapper MAPPER = new ObjectMapper();
+  private static final ObjectMapper MAPPER_WITH_INDENT_OUTPUT =
+      new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
+  private static final ObjectReader READER_WORKSTATUS =
+      new ObjectMapper().readerFor(DiskBalancerWorkStatus.class);
+  private static final ObjectReader READER_WORKENTRY = new ObjectMapper()
+      .readerFor(defaultInstance().constructCollectionType(List.class,
+          DiskBalancerWorkEntry.class));
 
   private final List<DiskBalancerWorkEntry> currentState;
   private Result result;
   private String planID;
+  private String planFile;
 
   /**
    * Constructs a default workStatus Object.
@@ -55,11 +65,13 @@ public class DiskBalancerWorkStatus {
    *
    * @param result - int
    * @param planID - Plan ID
+   * @param planFile - Plan file name
    */
-  public DiskBalancerWorkStatus(Result result, String planID) {
+  public DiskBalancerWorkStatus(Result result, String planID, String planFile) {
     this();
     this.result = result;
     this.planID = planID;
+    this.planFile = planFile;
   }
 
   /**
@@ -84,14 +96,12 @@ public class DiskBalancerWorkStatus {
    * @param planID       - Plan ID
    * @param currentState - List of WorkEntries.
    */
-  public DiskBalancerWorkStatus(Result result, String planID,
+  public DiskBalancerWorkStatus(Result result, String planID, String planFile,
                                 String currentState) throws IOException {
     this.result = result;
     this.planID = planID;
-    ObjectMapper mapper = new ObjectMapper();
-    this.currentState = mapper.readValue(currentState,
-        defaultInstance().constructCollectionType(
-            List.class, DiskBalancerWorkEntry.class));
+    this.planFile = planFile;
+    this.currentState = READER_WORKENTRY.readValue(currentState);
   }
 
 
@@ -114,6 +124,15 @@ public class DiskBalancerWorkStatus {
   }
 
   /**
+   * Returns planFile.
+   *
+   * @return String
+   */
+  public String getPlanFile() {
+    return planFile;
+  }
+
+  /**
    * Gets current Status.
    *
    * @return - Json String
@@ -128,15 +147,11 @@ public class DiskBalancerWorkStatus {
    * @throws IOException
    **/
   public String currentStateString() throws IOException {
-    ObjectMapper mapper = new ObjectMapper();
-    mapper.enable(SerializationConfig.Feature.INDENT_OUTPUT);
-    return mapper.writeValueAsString(currentState);
+    return MAPPER_WITH_INDENT_OUTPUT.writeValueAsString(currentState);
   }
 
   public String toJsonString() throws IOException {
-    ObjectMapper mapper = new ObjectMapper();
-    return mapper.writeValueAsString(this);
-
+    return MAPPER.writeValueAsString(this);
   }
 
   /**
@@ -147,8 +162,7 @@ public class DiskBalancerWorkStatus {
    */
   public static DiskBalancerWorkStatus parseJson(String json) throws
       IOException {
-    ObjectMapper mapper = new ObjectMapper();
-    return mapper.readValue(json, DiskBalancerWorkStatus.class);
+    return READER_WORKSTATUS.readValue(json);
   }
 
 

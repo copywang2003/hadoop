@@ -1,5 +1,3 @@
-package org.apache.hadoop.security.authentication.util;
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -17,6 +15,9 @@ package org.apache.hadoop.security.authentication.util;
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+package org.apache.hadoop.security.authentication.util;
+
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -54,7 +55,7 @@ public class KerberosName {
    * A pattern that matches a Kerberos name with at most 2 components.
    */
   private static final Pattern nameParser =
-    Pattern.compile("([^/@]*)(/([^/@]*))?@([^/@]*)");
+      Pattern.compile("([^/@]+)(/([^/@]+))?(@([^/@]+))?");
 
   /**
    * A pattern that matches a string with out '$' and then a single
@@ -109,7 +110,7 @@ public class KerberosName {
     } else {
       serviceName = match.group(1);
       hostName = match.group(3);
-      realm = match.group(4);
+      realm = match.group(5);
     }
   }
 

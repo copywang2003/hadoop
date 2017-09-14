@@ -52,6 +52,7 @@ import org.apache.hadoop.hdfs.protocol.proto.HdfsServerProtos.VersionResponsePro
 import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
+import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.hdfs.server.protocol.HeartbeatResponse;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
@@ -119,7 +120,9 @@ public class DatanodeProtocolServerSideTranslatorPB implements
           report, request.getCacheCapacity(), request.getCacheUsed(),
           request.getXmitsInProgress(),
           request.getXceiverCount(), request.getFailedVolumes(),
-          volumeFailureSummary, request.getRequestFullBlockReportLease());
+          volumeFailureSummary, request.getRequestFullBlockReportLease(),
+          PBHelper.convertSlowPeerInfo(request.getSlowPeersList()),
+          PBHelper.convertSlowDiskInfo(request.getSlowDisksList()));
     } catch (IOException e) {
       throw new ServiceException(e);
     }
@@ -230,7 +233,8 @@ public class DatanodeProtocolServerSideTranslatorPB implements
         info[i] = new StorageReceivedDeletedBlocks(
             PBHelperClient.convert(sBlock.getStorage()), rdBlocks);
       } else {
-        info[i] = new StorageReceivedDeletedBlocks(sBlock.getStorageUuid(), rdBlocks);
+        info[i] = new StorageReceivedDeletedBlocks(
+            new DatanodeStorage(sBlock.getStorageUuid()), rdBlocks);
       }
     }
     try {

@@ -29,8 +29,11 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.hadoop.classification.InterfaceAudience.Private;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.DataInputByteBuffer;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.yarn.api.protocolrecords.AllocateResponse;
 import org.apache.hadoop.yarn.api.records.AMCommand;
@@ -46,6 +49,7 @@ import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.ContainerState;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.ExecutionType;
+import org.apache.hadoop.yarn.api.records.ExecutionTypeRequest;
 import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
 import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.api.records.LocalResourceType;
@@ -63,10 +67,11 @@ import org.apache.hadoop.yarn.api.records.URL;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
+import org.apache.hadoop.yarn.nodelabels.CommonNodeLabelsManager;
 import org.apache.hadoop.yarn.security.ContainerTokenIdentifier;
-import org.apache.hadoop.yarn.util.ConverterUtils;
 
 import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.yarn.server.api.ContainerType;
 
 /**
  * Builder utilities to construct various objects.
@@ -156,12 +161,14 @@ public class BuilderUtils {
     return cId;
   }
 
-  public static Token newContainerToken(ContainerId cId, String host,
-      int port, String user, Resource r, long expiryTime, int masterKeyId,
-      byte[] password, long rmIdentifier) throws IOException {
+  public static Token newContainerToken(ContainerId cId, int containerVersion,
+      String host, int port, String user, Resource r, long expiryTime,
+      int masterKeyId, byte[] password, long rmIdentifier) throws IOException {
     ContainerTokenIdentifier identifier =
-        new ContainerTokenIdentifier(cId, host + ":" + port, user, r,
-          expiryTime, masterKeyId, rmIdentifier, Priority.newInstance(0), 0);
+        new ContainerTokenIdentifier(cId, containerVersion, host + ":" + port,
+            user, r, expiryTime, masterKeyId, rmIdentifier,
+            Priority.newInstance(0), 0, null, CommonNodeLabelsManager.NO_LABEL,
+            ContainerType.TASK, ExecutionType.GUARANTEED);
     return newContainerToken(BuilderUtils.newNodeId(host, port), password,
         identifier);
   }
@@ -236,7 +243,8 @@ public class BuilderUtils {
 
   public static Container newContainer(ContainerId containerId, NodeId nodeId,
       String nodeHttpAddress, Resource resource, Priority priority,
-      Token containerToken, ExecutionType executionType) {
+      Token containerToken, ExecutionType executionType,
+      long allocationRequestId) {
     Container container = recordFactory.newRecordInstance(Container.class);
     container.setId(containerId);
     container.setNodeId(nodeId);
@@ -245,6 +253,7 @@ public class BuilderUtils {
     container.setPriority(priority);
     container.setContainerToken(containerToken);
     container.setExecutionType(executionType);
+    container.setAllocationRequestId(allocationRequestId);
     return container;
   }
 
@@ -252,7 +261,15 @@ public class BuilderUtils {
       String nodeHttpAddress, Resource resource, Priority priority,
       Token containerToken) {
     return newContainer(containerId, nodeId, nodeHttpAddress, resource,
-        priority, containerToken, ExecutionType.GUARANTEED);
+        priority, containerToken, ExecutionType.GUARANTEED, 0);
+  }
+
+  public static Container newContainer(ContainerId containerId, NodeId nodeId,
+      String nodeHttpAddress, Resource resource, Priority priority,
+      Token containerToken, long allocationRequestId) {
+    return newContainer(containerId, nodeId, nodeHttpAddress, resource,
+        priority, containerToken, ExecutionType.GUARANTEED,
+        allocationRequestId);
   }
 
   public static <T extends Token> T newToken(Class<T> tokenClass,
@@ -335,6 +352,7 @@ public class BuilderUtils {
     request.setResourceName(hostName);
     request.setCapability(capability);
     request.setNumContainers(numContainers);
+    request.setExecutionTypeRequest(ExecutionTypeRequest.newInstance());
     return request;
   }
 
@@ -347,6 +365,7 @@ public class BuilderUtils {
     request.setCapability(capability);
     request.setNumContainers(numContainers);
     request.setNodeLabelExpression(label);
+    request.setExecutionTypeRequest(ExecutionTypeRequest.newInstance());
     return request;
   }
 
@@ -358,6 +377,7 @@ public class BuilderUtils {
     request.setCapability(r.getCapability());
     request.setNumContainers(r.getNumContainers());
     request.setNodeLabelExpression(r.getNodeLabelExpression());
+    request.setExecutionTypeRequest(r.getExecutionTypeRequest());
     return request;
   }
 
@@ -425,11 +445,12 @@ public class BuilderUtils {
       queue, priority, amContainer, isUnmanagedAM, cancelTokensWhenComplete,
       maxAppAttempts, resource, null);
   }
-  
+
   public static ApplicationResourceUsageReport newApplicationResourceUsageReport(
       int numUsedContainers, int numReservedContainers, Resource usedResources,
-      Resource reservedResources, Resource neededResources, long memorySeconds, 
-      long vcoreSeconds) {
+      Resource reservedResources, Resource neededResources,
+      Map<String, Long> resourceSecondsMap,
+      Map<String, Long> preemptedResourceSecondsMap) {
     ApplicationResourceUsageReport report =
         recordFactory.newRecordInstance(ApplicationResourceUsageReport.class);
     report.setNumUsedContainers(numUsedContainers);
@@ -437,14 +458,14 @@ public class BuilderUtils {
     report.setUsedResources(usedResources);
     report.setReservedResources(reservedResources);
     report.setNeededResources(neededResources);
-    report.setMemorySeconds(memorySeconds);
-    report.setVcoreSeconds(vcoreSeconds);
+    report.setResourceSecondsMap(resourceSecondsMap);
+    report.setPreemptedResourceSecondsMap(preemptedResourceSecondsMap);
     return report;
   }
 
-  public static Resource newResource(long memory, long vCores) {
+  public static Resource newResource(long memory, int vCores) {
     Resource resource = recordFactory.newRecordInstance(Resource.class);
-    resource.setMemory(memory);
+    resource.setMemorySize(memory);
     resource.setVirtualCores(vCores);
     return resource;
   }
@@ -475,5 +496,32 @@ public class BuilderUtils {
     response.setPreemptionMessage(preempt);
 
     return response;
+  }
+
+  public static Credentials parseCredentials(
+      ApplicationSubmissionContext application) throws IOException {
+    Credentials credentials = new Credentials();
+    DataInputByteBuffer dibb = new DataInputByteBuffer();
+    ByteBuffer tokens = application.getAMContainerSpec().getTokens();
+    if (tokens != null) {
+      dibb.reset(tokens);
+      credentials.readTokenStorageStream(dibb);
+      tokens.rewind();
+    }
+    return credentials;
+  }
+
+  public static Configuration parseTokensConf(
+      ApplicationSubmissionContext context) throws IOException {
+    ByteBuffer tokensConf = context.getAMContainerSpec().getTokensConf();
+    if (tokensConf == null) {
+      return null;
+    }
+    DataInputByteBuffer dibb = new DataInputByteBuffer();
+    dibb.reset(tokensConf);
+    Configuration appConf = new Configuration(false);
+    appConf.readFields(dibb);
+    tokensConf.rewind();
+    return appConf;
   }
 }

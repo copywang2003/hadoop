@@ -85,7 +85,7 @@ public abstract class FileInputFormat<K, V> extends InputFormat<K, V> {
   private static final double SPLIT_SLOP = 1.1;   // 10% slop
   
   @Deprecated
-  public static enum Counter { 
+  public enum Counter {
     BYTES_READ
   }
 
@@ -422,6 +422,13 @@ public abstract class FileInputFormat<K, V> extends InputFormat<K, V> {
                        blkLocations[blkIndex].getCachedHosts()));
           }
         } else { // not splitable
+          if (LOG.isDebugEnabled()) {
+            // Log only if the file is big enough to be splitted
+            if (length > Math.min(file.getBlockSize(), minSize)) {
+              LOG.debug("File is not splittable so no parallelization "
+                  + "is possible: " + file.getPath());
+            }
+          }
           splits.add(makeSplit(path, 0, length, blkLocations[0].getHosts(),
                       blkLocations[0].getCachedHosts()));
         }

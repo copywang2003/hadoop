@@ -18,14 +18,14 @@
 package org.apache.hadoop.nfs.nfs3;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 
-import org.apache.commons.io.Charsets;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.oncrpc.XDR;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This is a file handle use by the NFS clients.
@@ -33,7 +33,7 @@ import org.apache.hadoop.oncrpc.XDR;
  * on subsequent operations to reference the file.
  */
 public class FileHandle {
-  private static final Log LOG = LogFactory.getLog(FileHandle.class);
+  private static final Logger LOG = LoggerFactory.getLogger(FileHandle.class);
   private static final String HEXES = "0123456789abcdef";
   private static final int HANDLE_LEN = 32;
   private byte[] handle; // Opaque handle
@@ -45,6 +45,7 @@ public class FileHandle {
 
   /**
    * Handle is a 32 bytes number. For HDFS, the last 8 bytes is fileId.
+   * @param v file id
    */
   public FileHandle(long v) {
     fileId = v;
@@ -73,7 +74,7 @@ public class FileHandle {
       return;
     }
 
-    byte[] in = s.getBytes(Charsets.UTF_8);
+    byte[] in = s.getBytes(StandardCharsets.UTF_8);
     digest.update(in);
 
     byte[] digestbytes = digest.digest();

@@ -35,7 +35,6 @@ import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.ContainerResourceChangeRequest;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueACL;
@@ -50,6 +49,8 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.QueueEntit
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.SchedulerEvent;
 import org.apache.hadoop.yarn.proto.YarnServiceProtos.SchedulerResourceTypes;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
+
+import com.google.common.util.concurrent.SettableFuture;
 
 /**
  * This interface is used by the components to talk to the
@@ -134,8 +135,7 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
    * @param release
    * @param blacklistAdditions 
    * @param blacklistRemovals 
-   * @param increaseRequests
-   * @param decreaseRequests
+   * @param updateRequests
    * @return the {@link Allocation} for the application
    */
   @Public
@@ -143,8 +143,7 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
   Allocation allocate(ApplicationAttemptId appAttemptId,
       List<ResourceRequest> ask, List<ContainerId> release,
       List<String> blacklistAdditions, List<String> blacklistRemovals,
-      List<ContainerResourceChangeRequest> increaseRequests,
-      List<ContainerResourceChangeRequest> decreaseRequests);
+      ContainerUpdates updateRequests);
 
   /**
    * Get node resource usage report.
@@ -227,6 +226,17 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
       throws YarnException;
 
   /**
+   *
+   * @param appId Application ID
+   * @param newQueue Target QueueName
+   * @throws YarnException if the pre-validation for move cannot be carried out
+   */
+  @LimitedPrivate("yarn")
+  @Evolving
+  public void preValidateMoveApplication(ApplicationId appId,
+      String newQueue) throws YarnException;
+
+  /**
    * Completely drain sourceQueue of applications, by moving all of them to
    * destQueue.
    *
@@ -297,7 +307,7 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
    * Verify whether a submitted application priority is valid as per configured
    * Queue
    *
-   * @param priorityFromContext
+   * @param priorityRequestedByApp
    *          Submitted Application priority.
    * @param user
    *          User who submitted the Application
@@ -307,8 +317,8 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
    *          Application ID
    * @return Updated Priority from scheduler
    */
-  public Priority checkAndGetApplicationPriority(Priority priorityFromContext,
-      String user, String queueName, ApplicationId applicationId)
+  public Priority checkAndGetApplicationPriority(Priority priorityRequestedByApp,
+      UserGroupInformation user, String queueName, ApplicationId applicationId)
       throws YarnException;
 
   /**
@@ -318,9 +328,15 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
    * @param newPriority Submitted Application priority.
    *
    * @param applicationId Application ID
+   *
+   * @param future Sets any type of exception happened from StateStore
+   * @param user who submitted the application
+   *
+   * @return updated priority
    */
-  public void updateApplicationPriority(Priority newPriority,
-      ApplicationId applicationId) throws YarnException;
+  public Priority updateApplicationPriority(Priority newPriority,
+      ApplicationId applicationId, SettableFuture<Object> future,
+      UserGroupInformation user) throws YarnException;
 
   /**
    *
@@ -361,4 +377,32 @@ public interface YarnScheduler extends EventHandler<SchedulerEvent> {
    * @return SchedulerNode corresponds to nodeId
    */
   SchedulerNode getSchedulerNode(NodeId nodeId);
+
+  /**
+   * Normalize a resource request.
+   *
+   * @param requestedResource the resource to be normalized
+   * @return the normalized resource
+   */
+  Resource getNormalizedResource(Resource requestedResource);
+
+  /**
+   * Verify whether a submitted application lifetime is valid as per configured
+   * Queue lifetime.
+   * @param queueName Name of the Queue
+   * @param lifetime configured application lifetime
+   * @return valid lifetime as per queue
+   */
+  @Public
+  @Evolving
+  long checkAndGetApplicationLifetime(String queueName, long lifetime);
+
+  /**
+   * Get maximum lifetime for a queue.
+   * @param queueName to get lifetime
+   * @return maximum lifetime in seconds
+   */
+  @Public
+  @Evolving
+  long getMaximumApplicationLifetime(String queueName);
 }

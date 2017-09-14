@@ -46,7 +46,6 @@ import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.DrainDispatcher;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.server.resourcemanager.MockAM;
@@ -62,6 +61,7 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAt
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
+import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.junit.Assert;
 import org.junit.Test;
@@ -114,13 +114,15 @@ public class TestRMContainerImpl {
         YarnConfiguration.APPLICATION_HISTORY_SAVE_NON_AM_CONTAINER_META_INFO,
         true);
     when(rmContext.getYarnConfiguration()).thenReturn(conf);
-    RMContainer rmContainer = new RMContainerImpl(container, appAttemptId,
+    RMContainer rmContainer = new RMContainerImpl(container,
+        SchedulerRequestKey.extractFrom(container), appAttemptId,
         nodeId, "user", rmContext);
 
     assertEquals(RMContainerState.NEW, rmContainer.getState());
     assertEquals(resource, rmContainer.getAllocatedResource());
     assertEquals(nodeId, rmContainer.getAllocatedNode());
-    assertEquals(priority, rmContainer.getAllocatedPriority());
+    assertEquals(priority,
+        rmContainer.getAllocatedSchedulerKey().getPriority());
     verify(writer).containerStarted(any(RMContainer.class));
     verify(publisher).containerCreated(any(RMContainer.class), anyLong());
 
@@ -215,13 +217,15 @@ public class TestRMContainerImpl {
     when(rmContext.getYarnConfiguration()).thenReturn(conf);
     when(rmContext.getRMApps()).thenReturn(appMap);
     
-    RMContainer rmContainer = new RMContainerImpl(container, appAttemptId,
+    RMContainer rmContainer = new RMContainerImpl(container,
+        SchedulerRequestKey.extractFrom(container), appAttemptId,
         nodeId, "user", rmContext);
 
     assertEquals(RMContainerState.NEW, rmContainer.getState());
     assertEquals(resource, rmContainer.getAllocatedResource());
     assertEquals(nodeId, rmContainer.getAllocatedNode());
-    assertEquals(priority, rmContainer.getAllocatedPriority());
+    assertEquals(priority,
+        rmContainer.getAllocatedSchedulerKey().getPriority());
     verify(writer).containerStarted(any(RMContainer.class));
     verify(publisher).containerCreated(any(RMContainer.class), anyLong());
 

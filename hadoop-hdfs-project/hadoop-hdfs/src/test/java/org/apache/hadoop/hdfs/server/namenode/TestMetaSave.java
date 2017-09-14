@@ -64,8 +64,9 @@ public class TestMetaSave {
     Configuration conf = new HdfsConfiguration();
 
     // High value of replication interval
-    // so that blocks remain under-replicated
-    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1000);
+    // so that blocks remain less redundant
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
+        1000);
     conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1L);
     conf.setLong(DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, 1L);
     conf.setLong(DFSConfigKeys.DFS_NAMENODE_STALE_DATANODE_INTERVAL_KEY, 5L);
@@ -154,6 +155,8 @@ public class TestMetaSave {
       line = reader.readLine();
       assertTrue(line.equals("Metasave: Blocks waiting for reconstruction: 0"));
       line = reader.readLine();
+      assertTrue(line.equals("Metasave: Blocks currently missing: 0"));
+      line = reader.readLine();
       assertTrue(line.equals("Mis-replicated blocks that have been postponed:"));
       line = reader.readLine();
       assertTrue(line.equals("Metasave: Blocks being reconstructed: 0"));
@@ -162,6 +165,7 @@ public class TestMetaSave {
       //skip 2 lines to reach HDFS-9033 scenario.
       line = reader.readLine();
       line = reader.readLine();
+      assertTrue(line.contains("blk"));
       // skip 1 line for Corrupt Blocks section.
       line = reader.readLine();
       line = reader.readLine();

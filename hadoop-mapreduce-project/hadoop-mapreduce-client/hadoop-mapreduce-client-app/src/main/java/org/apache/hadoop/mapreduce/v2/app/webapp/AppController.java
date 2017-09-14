@@ -84,11 +84,11 @@ public class AppController extends Controller implements AMParams {
   public void info() {
     AppInfo info = new AppInfo(app, app.context);
     info("Application Master Overview").
-      _("Application ID:", info.getId()).
-      _("Application Name:", info.getName()).
-      _("User:", info.getUser()).
-      _("Started on:", Times.format(info.getStartTime())).
-      _("Elasped: ", org.apache.hadoop.util.StringUtils.formatTime(
+        __("Application ID:", info.getId()).
+        __("Application Name:", info.getName()).
+        __("User:", info.getUser()).
+        __("Started on:", Times.format(info.getStartTime())).
+        __("Elasped: ", org.apache.hadoop.util.StringUtils.formatTime(
           info.getElapsedTime() ));
     render(InfoPage.class);
   }
@@ -324,6 +324,40 @@ public class AppController extends Controller implements AMParams {
   }
 
   /**
+   * Handle requests to download the job configuration.
+   */
+  public void downloadConf() {
+    try {
+      requireJob();
+    } catch (Exception e) {
+      renderText(e.getMessage());
+      return;
+    }
+    writeJobConf();
+  }
+
+  private void writeJobConf() {
+    String jobId = $(JOB_ID);
+    assert(!jobId.isEmpty());
+
+    JobId jobID = MRApps.toJobID($(JOB_ID));
+    Job job = app.context.getJob(jobID);
+    assert(job != null);
+
+    try {
+      Configuration jobConf = job.loadConfFile();
+      response().setContentType("text/xml");
+      response().setHeader("Content-Disposition",
+          "attachment; filename=" + jobId + ".xml");
+      jobConf.writeXml(writer());
+    } catch (IOException e) {
+      LOG.error("Error reading/writing job" +
+          " conf file for job: " + jobId, e);
+      renderText(e.getMessage());
+    }
+  }
+
+  /**
    * Render a BAD_REQUEST error.
    * @param s the error message to include.
    */
@@ -358,10 +392,11 @@ public class AppController extends Controller implements AMParams {
    */
   boolean checkAccess(Job job) {
     String remoteUser = request().getRemoteUser();
-    UserGroupInformation callerUGI = null;
-    if (remoteUser != null) {
-      callerUGI = UserGroupInformation.createRemoteUser(remoteUser);
+    if (remoteUser == null) {
+      return false;
     }
+    UserGroupInformation callerUGI =
+        UserGroupInformation.createRemoteUser(remoteUser);
     if (callerUGI != null && !job.checkAccess(callerUGI, JobACL.VIEW_JOB)) {
       return false;
     }

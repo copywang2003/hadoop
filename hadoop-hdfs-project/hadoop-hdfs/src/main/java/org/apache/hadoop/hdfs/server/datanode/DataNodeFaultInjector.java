@@ -21,6 +21,7 @@ import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 
 /**
@@ -30,7 +31,7 @@ import java.io.IOException;
 @VisibleForTesting
 @InterfaceAudience.Private
 public class DataNodeFaultInjector {
-  public static DataNodeFaultInjector instance = new DataNodeFaultInjector();
+  private static DataNodeFaultInjector instance = new DataNodeFaultInjector();
 
   public static DataNodeFaultInjector get() {
     return instance;
@@ -50,9 +51,42 @@ public class DataNodeFaultInjector {
     return false;
   }
 
-  public void stopSendingPacketDownstream() throws IOException {}
+  public void stopSendingPacketDownstream(final String mirrAddr)
+      throws IOException {
+  }
+
+  /**
+   * Used as a hook to intercept the latency of sending packet.
+   */
+  public void logDelaySendingPacketDownstream(
+      final String mirrAddr,
+      final long delayMs) throws IOException {
+  }
+
+  public void delaySendingAckToUpstream(final String upstreamAddr)
+      throws IOException {
+  }
+
+  /**
+   * Used as a hook to intercept the latency of sending ack.
+   */
+  public void logDelaySendingAckToUpstream(
+      final String upstreamAddr,
+      final long delayMs)
+      throws IOException {
+  }
 
   public void noRegistration() throws IOException { }
 
   public void failMirrorConnection() throws IOException { }
+
+  public void failPipeline(ReplicaInPipeline replicaInfo,
+      String mirrorAddr) throws IOException { }
+
+  public void startOfferService() throws Exception {}
+
+  public void endOfferService() throws Exception {}
+
+  public void throwTooManyOpenFiles() throws FileNotFoundException {
+  }
 }

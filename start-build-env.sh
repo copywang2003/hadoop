@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
@@ -31,11 +31,13 @@ else # boot2docker uid and gid
   GROUP_ID=50
 fi
 
-docker build -t "hadoop-build-${USER_NAME}" - <<UserSpecificDocker
+docker build -t "hadoop-build-${USER_ID}" - <<UserSpecificDocker
 FROM hadoop-build
 RUN groupadd --non-unique -g ${GROUP_ID} ${USER_NAME}
 RUN useradd -g ${GROUP_ID} -u ${USER_ID} -k /root -m ${USER_NAME}
+RUN echo "${USER_NAME}\tALL=NOPASSWD: ALL" > "/etc/sudoers.d/hadoop-build-${USER_ID}"
 ENV HOME /home/${USER_NAME}
+
 UserSpecificDocker
 
 # By mapping the .m2 directory you can do an mvn install from
@@ -47,4 +49,4 @@ docker run --rm=true -t -i \
   -w "/home/${USER_NAME}/hadoop" \
   -v "${HOME}/.m2:/home/${USER_NAME}/.m2" \
   -u "${USER_NAME}" \
-  "hadoop-build-${USER_NAME}"
+  "hadoop-build-${USER_ID}"

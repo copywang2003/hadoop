@@ -17,7 +17,6 @@
  */
 
 package org.apache.hadoop.minikdc;
-import org.apache.commons.io.Charsets;
 import org.apache.kerby.kerberos.kerb.KrbException;
 import org.apache.kerby.kerberos.kerb.server.KdcConfigKey;
 import org.apache.kerby.kerberos.kerb.server.SimpleKdcServer;
@@ -31,6 +30,7 @@ import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Locale;
@@ -95,7 +95,8 @@ public class MiniKdc {
     Properties userConf = new Properties();
     InputStreamReader r = null;
     try {
-      r = new InputStreamReader(new FileInputStream(file), Charsets.UTF_8);
+      r = new InputStreamReader(new FileInputStream(file),
+          StandardCharsets.UTF_8);
       userConf.load(r);
     } finally {
       if (r != null) {
@@ -364,8 +365,11 @@ public class MiniKdc {
         LOG.warn("WARNING: cannot delete file " + f.getAbsolutePath());
       }
     } else {
-      for (File c: f.listFiles()) {
-        delete(c);
+      File[] fileList = f.listFiles();
+      if (fileList != null) {
+        for (File c : fileList) {
+          delete(c);
+        }
       }
       if (! f.delete()) {
         LOG.warn("WARNING: cannot delete directory " + f.getAbsolutePath());

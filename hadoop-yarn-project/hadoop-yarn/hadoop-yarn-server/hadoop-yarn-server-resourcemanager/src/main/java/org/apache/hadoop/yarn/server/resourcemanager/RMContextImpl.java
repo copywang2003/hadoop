@@ -22,9 +22,8 @@ import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentMap;
 
 import org.apache.hadoop.classification.InterfaceAudience.Private;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
-import org.apache.hadoop.ha.HAServiceProtocol;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
 import org.apache.hadoop.yarn.LocalConfigurationProvider;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -38,8 +37,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMDelegatedNodeL
 import org.apache.hadoop.yarn.server.resourcemanager.placement.PlacementManager;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSystem;
+import org.apache.hadoop.yarn.server.resourcemanager.resource.ResourceProfilesManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AMLivelinessMonitor;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.monitor.RMAppLifetimeMonitor;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
@@ -51,38 +52,46 @@ import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRen
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMDelegationTokenSecretManager;
+import org.apache.hadoop.yarn.server.resourcemanager.timelineservice.RMTimelineCollectorManager;
 import org.apache.hadoop.yarn.util.Clock;
 
 import com.google.common.annotations.VisibleForTesting;
 
+/**
+ * RMContextImpl class holds two services context.
+ * <ul>
+ * <li>serviceContext : These services called as <b>Always On</b> services.
+ * Services that need to run always irrespective of the HA state of the RM.</li>
+ * <li>activeServiceCotext : Active services context. Services that need to run
+ * only on the Active RM.</li>
+ * </ul>
+ * <p>
+ * <b>Note:</b> If any new service to be added to context, add it to a right
+ * context as per above description.
+ */
 public class RMContextImpl implements RMContext {
 
-  private Dispatcher rmDispatcher;
+  /**
+   * RM service contexts which runs through out RM life span. These are created
+   * once during start of RM.
+   */
+  private RMServiceContext serviceContext;
 
-  private boolean isHAEnabled;
-
-  private HAServiceState haServiceState =
-      HAServiceProtocol.HAServiceState.INITIALIZING;
-
-  private AdminService adminService;
-
-  private ConfigurationProvider configurationProvider;
-
+  /**
+   * RM Active service context. This will be recreated for every transition from
+   * ACTIVE->STANDBY.
+   */
   private RMActiveServiceContext activeServiceContext;
 
-  private Configuration yarnConfiguration;
-
-  private RMApplicationHistoryWriter rmApplicationHistoryWriter;
-  private SystemMetricsPublisher systemMetricsPublisher;
-  private LeaderElectorService elector;
-
-  private QueueLimitCalculator queueLimitCalculator;
+  private ResourceProfilesManager resourceProfilesManager;
 
   /**
    * Default constructor. To be used in conjunction with setter methods for
    * individual fields.
    */
   public RMContextImpl() {
+    this.serviceContext = new RMServiceContext();
+    this.activeServiceContext = new RMActiveServiceContext();
   }
 
   @VisibleForTesting
@@ -133,19 +142,154 @@ public class RMContextImpl implements RMContext {
       clientToAMTokenSecretManager, null);
   }
 
+  /**
+   * RM service contexts which runs through out JVM life span. These are created
+   * once during start of RM.
+   * @return serviceContext of RM
+   */
+  @Private
+  @Unstable
+  public RMServiceContext getServiceContext() {
+    return serviceContext;
+  }
+
+  /**
+   * <b>Note:</b> setting service context clears all services embedded with it.
+   * @param context rm service context
+   */
+  @Private
+  @Unstable
+  public void setServiceContext(RMServiceContext context) {
+    this.serviceContext = context;
+  }
+
+  @Override
+  public ResourceManager getResourceManager() {
+    return serviceContext.getResourceManager();
+  }
+
+  public void setResourceManager(ResourceManager rm) {
+    serviceContext.setResourceManager(rm);
+  }
+
+  @Override
+  public EmbeddedElector getLeaderElectorService() {
+    return serviceContext.getLeaderElectorService();
+  }
+
+  @Override
+  public void setLeaderElectorService(EmbeddedElector elector) {
+    serviceContext.setLeaderElectorService(elector);
+  }
+
   @Override
   public Dispatcher getDispatcher() {
-    return this.rmDispatcher;
+    return serviceContext.getDispatcher();
+  }
+
+  void setDispatcher(Dispatcher dispatcher) {
+    serviceContext.setDispatcher(dispatcher);
   }
 
   @Override
-  public void setLeaderElectorService(LeaderElectorService elector) {
-    this.elector = elector;
+  public AdminService getRMAdminService() {
+    return serviceContext.getRMAdminService();
+  }
+
+  void setRMAdminService(AdminService adminService) {
+    serviceContext.setRMAdminService(adminService);
   }
 
   @Override
-  public LeaderElectorService getLeaderElectorService() {
-    return this.elector;
+  public boolean isHAEnabled() {
+    return serviceContext.isHAEnabled();
+  }
+
+  void setHAEnabled(boolean isHAEnabled) {
+    serviceContext.setHAEnabled(isHAEnabled);
+  }
+
+  @Override
+  public HAServiceState getHAServiceState() {
+    return serviceContext.getHAServiceState();
+  }
+
+  void setHAServiceState(HAServiceState serviceState) {
+    serviceContext.setHAServiceState(serviceState);
+  }
+
+  @Override
+  public RMApplicationHistoryWriter getRMApplicationHistoryWriter() {
+    return serviceContext.getRMApplicationHistoryWriter();
+  }
+
+  @Override
+  public void setRMApplicationHistoryWriter(
+      RMApplicationHistoryWriter rmApplicationHistoryWriter) {
+    serviceContext.setRMApplicationHistoryWriter(rmApplicationHistoryWriter);
+  }
+
+  @Override
+  public SystemMetricsPublisher getSystemMetricsPublisher() {
+    return serviceContext.getSystemMetricsPublisher();
+  }
+
+  @Override
+  public void setSystemMetricsPublisher(
+      SystemMetricsPublisher metricsPublisher) {
+    serviceContext.setSystemMetricsPublisher(metricsPublisher);
+  }
+
+  @Override
+  public RMTimelineCollectorManager getRMTimelineCollectorManager() {
+    return serviceContext.getRMTimelineCollectorManager();
+  }
+
+  @Override
+  public void setRMTimelineCollectorManager(
+      RMTimelineCollectorManager timelineCollectorManager) {
+    serviceContext.setRMTimelineCollectorManager(timelineCollectorManager);
+  }
+
+  @Override
+  public ConfigurationProvider getConfigurationProvider() {
+    return serviceContext.getConfigurationProvider();
+  }
+
+  public void setConfigurationProvider(
+      ConfigurationProvider configurationProvider) {
+    serviceContext.setConfigurationProvider(configurationProvider);
+  }
+
+  @Override
+  public Configuration getYarnConfiguration() {
+    return serviceContext.getYarnConfiguration();
+  }
+
+  public void setYarnConfiguration(Configuration yarnConfiguration) {
+    serviceContext.setYarnConfiguration(yarnConfiguration);
+  }
+
+  public String getHAZookeeperConnectionState() {
+    return serviceContext.getHAZookeeperConnectionState();
+  }
+
+  // ==========================================================================
+  /**
+   * RM Active service context. This will be recreated for every transition from
+   * ACTIVE to STANDBY.
+   * @return activeServiceContext of active services
+   */
+  @Private
+  @Unstable
+  public RMActiveServiceContext getActiveServiceContext() {
+    return activeServiceContext;
+  }
+
+  @Private
+  @Unstable
+  void setActiveServiceContext(RMActiveServiceContext activeServiceContext) {
+    this.activeServiceContext = activeServiceContext;
   }
 
   @Override
@@ -223,11 +367,6 @@ public class RMContextImpl implements RMContext {
     return activeServiceContext.getClientToAMTokenSecretManager();
   }
 
-  @Override
-  public AdminService getRMAdminService() {
-    return this.adminService;
-  }
-
   @VisibleForTesting
   public void setStateStore(RMStateStore store) {
     activeServiceContext.setStateStore(store);
@@ -246,24 +385,6 @@ public class RMContextImpl implements RMContext {
   @Override
   public ResourceTrackerService getResourceTrackerService() {
     return activeServiceContext.getResourceTrackerService();
-  }
-
-  void setHAEnabled(boolean isHAEnabled) {
-    this.isHAEnabled = isHAEnabled;
-  }
-
-  void setHAServiceState(HAServiceState haServiceState) {
-    synchronized (haServiceState) {
-      this.haServiceState = haServiceState;
-    }
-  }
-
-  void setDispatcher(Dispatcher dispatcher) {
-    this.rmDispatcher = dispatcher;
-  }
-
-  void setRMAdminService(AdminService adminService) {
-    this.adminService = adminService;
   }
 
   @Override
@@ -343,18 +464,6 @@ public class RMContextImpl implements RMContext {
     activeServiceContext.setResourceTrackerService(resourceTrackerService);
   }
 
-  @Override
-  public boolean isHAEnabled() {
-    return isHAEnabled;
-  }
-
-  @Override
-  public HAServiceState getHAServiceState() {
-    synchronized (haServiceState) {
-      return haServiceState;
-    }
-  }
-
   public void setWorkPreservingRecoveryEnabled(boolean enabled) {
     activeServiceContext.setWorkPreservingRecoveryEnabled(enabled);
   }
@@ -364,38 +473,6 @@ public class RMContextImpl implements RMContext {
     return activeServiceContext.isWorkPreservingRecoveryEnabled();
   }
 
-  @Override
-  public RMApplicationHistoryWriter getRMApplicationHistoryWriter() {
-    return this.rmApplicationHistoryWriter;
-  }
-
-  @Override
-  public void setSystemMetricsPublisher(
-      SystemMetricsPublisher systemMetricsPublisher) {
-    this.systemMetricsPublisher = systemMetricsPublisher;
-  }
-
-  @Override
-  public SystemMetricsPublisher getSystemMetricsPublisher() {
-    return this.systemMetricsPublisher;
-  }
-
-  @Override
-  public void setRMApplicationHistoryWriter(
-      RMApplicationHistoryWriter rmApplicationHistoryWriter) {
-    this.rmApplicationHistoryWriter = rmApplicationHistoryWriter;
-
-  }
-
-  @Override
-  public ConfigurationProvider getConfigurationProvider() {
-    return this.configurationProvider;
-  }
-
-  public void setConfigurationProvider(
-      ConfigurationProvider configurationProvider) {
-    this.configurationProvider = configurationProvider;
-  }
 
   @Override
   public long getEpoch() {
@@ -446,27 +523,6 @@ public class RMContextImpl implements RMContext {
     return activeServiceContext.getSystemCredentialsForApps();
   }
 
-  @Private
-  @Unstable
-  public RMActiveServiceContext getActiveServiceContext() {
-    return activeServiceContext;
-  }
-
-  @Private
-  @Unstable
-  void setActiveServiceContext(RMActiveServiceContext activeServiceContext) {
-    this.activeServiceContext = activeServiceContext;
-  }
-
-  @Override
-  public Configuration getYarnConfiguration() {
-    return this.yarnConfiguration;
-  }
-
-  public void setYarnConfiguration(Configuration yarnConfiguration) {
-    this.yarnConfiguration=yarnConfiguration;
-  }
-
   @Override
   public PlacementManager getQueuePlacementManager() {
     return this.activeServiceContext.getQueuePlacementManager();
@@ -479,11 +535,33 @@ public class RMContextImpl implements RMContext {
 
   @Override
   public QueueLimitCalculator getNodeManagerQueueLimitCalculator() {
-    return this.queueLimitCalculator;
+    return activeServiceContext.getNodeManagerQueueLimitCalculator();
   }
 
   public void setContainerQueueLimitCalculator(
       QueueLimitCalculator limitCalculator) {
-    this.queueLimitCalculator = limitCalculator;
+    activeServiceContext.setContainerQueueLimitCalculator(limitCalculator);
   }
+
+  @Override
+  public void setRMAppLifetimeMonitor(
+      RMAppLifetimeMonitor rmAppLifetimeMonitor) {
+    this.activeServiceContext.setRMAppLifetimeMonitor(rmAppLifetimeMonitor);
+  }
+
+  @Override
+  public RMAppLifetimeMonitor getRMAppLifetimeMonitor() {
+    return this.activeServiceContext.getRMAppLifetimeMonitor();
+  }
+
+  @Override
+  public ResourceProfilesManager getResourceProfilesManager() {
+    return this.resourceProfilesManager;
+  }
+
+  @Override
+  public void setResourceProfilesManager(ResourceProfilesManager mgr) {
+    this.resourceProfilesManager = mgr;
+  }
+  // Note: Read java doc before adding any services over here.
 }

@@ -197,7 +197,6 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
                new ChecksumFSInputChecker(fs, file)) {
         checker.seek(position);
         nread = checker.read(b, off, len);
-        checker.close();
       }
       return nread;
     }
@@ -356,12 +355,14 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
   @Override
   public FSDataOutputStream append(Path f, int bufferSize,
       Progressable progress) throws IOException {
-    throw new IOException("Not supported");
+    throw new UnsupportedOperationException("Append is not supported "
+        + "by ChecksumFileSystem");
   }
 
   @Override
   public boolean truncate(Path f, long newLength) throws IOException {
-    throw new IOException("Not supported");
+    throw new UnsupportedOperationException("Truncate is not supported "
+        + "by ChecksumFileSystem");
   }
 
   /**
@@ -604,6 +605,7 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
    * Rename files/dirs
    */
   @Override
+  @SuppressWarnings("deprecation")
   public boolean rename(Path src, Path dst) throws IOException {
     if (fs.isDirectory(src)) {
       return fs.rename(src, dst);
@@ -720,6 +722,7 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
    * If src and dst are directories, the copyCrc parameter
    * determines whether to copy CRC files.
    */
+  @SuppressWarnings("deprecation")
   public void copyToLocalFile(Path src, Path dst, boolean copyCrc)
     throws IOException {
     if (!fs.isDirectory(src)) { // source is a file

@@ -119,9 +119,8 @@ public class TestReservationInputValidator {
     } catch (YarnException e) {
       Assert.assertNull(plan);
       String message = e.getMessage();
-      Assert
-          .assertTrue(message
-              .equals("The queue is not specified. Please try again with a valid reservable queue."));
+      Assert.assertEquals("The queue is not specified. Please try again with a "
+          + "valid reservable queue.", message);
       LOG.info(message);
     }
   }
@@ -161,9 +160,8 @@ public class TestReservationInputValidator {
     } catch (YarnException e) {
       Assert.assertNull(plan);
       String message = e.getMessage();
-      Assert
-          .assertTrue(message
-              .equals("Missing reservation definition. Please try again by specifying a reservation definition."));
+      Assert.assertEquals("Missing reservation definition. Please try again by "
+          + "specifying a reservation definition.", message);
       LOG.info(message);
     }
   }
@@ -261,10 +259,81 @@ public class TestReservationInputValidator {
     } catch (YarnException e) {
       Assert.assertNull(plan);
       String message = e.getMessage();
-      Assert
-          .assertTrue(message
-              .startsWith("The size of the largest gang in the reservation refinition"));
-      Assert.assertTrue(message.contains("exceed the capacity available "));
+      Assert.assertTrue(message.startsWith(
+          "The size of the largest gang in the reservation definition"));
+      Assert.assertTrue(message.contains(
+          "exceed the capacity available "));
+      LOG.info(message);
+    }
+  }
+
+  @Test
+  public void testSubmitReservationValidRecurrenceExpression() {
+    ReservationSubmissionRequest request =
+        createSimpleReservationSubmissionRequest(1, 1, 1, 5, 3, "600000");
+    plan = null;
+    try {
+      plan =
+          rrValidator.validateReservationSubmissionRequest(rSystem, request,
+              ReservationSystemTestUtil.getNewReservationId());
+    } catch (YarnException e) {
+      Assert.fail(e.getMessage());
+    }
+    Assert.assertNotNull(plan);
+  }
+
+  @Test
+  public void testSubmitReservationNegativeRecurrenceExpression() {
+    ReservationSubmissionRequest request =
+        createSimpleReservationSubmissionRequest(1, 1, 1, 5, 3, "-1234");
+    plan = null;
+    try {
+      plan =
+          rrValidator.validateReservationSubmissionRequest(rSystem, request,
+              ReservationSystemTestUtil.getNewReservationId());
+      Assert.fail();
+    } catch (YarnException e) {
+      Assert.assertNull(plan);
+      String message = e.getMessage();
+      Assert.assertTrue(message
+          .startsWith("Negative Period : "));
+      LOG.info(message);
+    }
+  }
+
+  @Test
+  public void testSubmitReservationInvalidRecurrenceExpression() {
+    // first check recurrence expression
+    ReservationSubmissionRequest request =
+        createSimpleReservationSubmissionRequest(1, 1, 1, 5, 3, "123abc");
+    plan = null;
+    try {
+      plan =
+          rrValidator.validateReservationSubmissionRequest(rSystem, request,
+              ReservationSystemTestUtil.getNewReservationId());
+      Assert.fail();
+    } catch (YarnException e) {
+      Assert.assertNull(plan);
+      String message = e.getMessage();
+      Assert.assertTrue(message
+          .startsWith("Invalid period "));
+      LOG.info(message);
+    }
+
+    // now check duration
+    request =
+        createSimpleReservationSubmissionRequest(1, 1, 1, 50, 3, "10");
+    plan = null;
+    try {
+      plan =
+          rrValidator.validateReservationSubmissionRequest(rSystem, request,
+              ReservationSystemTestUtil.getNewReservationId());
+      Assert.fail();
+    } catch (YarnException e) {
+      Assert.assertNull(plan);
+      String message = e.getMessage();
+      Assert.assertTrue(message
+          .startsWith("Duration of the requested reservation:"));
       LOG.info(message);
     }
   }
@@ -440,10 +509,77 @@ public class TestReservationInputValidator {
     } catch (YarnException e) {
       Assert.assertNull(plan);
       String message = e.getMessage();
-      Assert
-          .assertTrue(message
-              .startsWith("The size of the largest gang in the reservation refinition"));
-      Assert.assertTrue(message.contains("exceed the capacity available "));
+      Assert.assertTrue(message.startsWith(
+          "The size of the largest gang in the reservation definition"));
+      Assert.assertTrue(message.contains(
+          "exceed the capacity available "));
+      LOG.info(message);
+    }
+  }
+
+  @Test
+  public void testUpdateReservationValidRecurrenceExpression() {
+    ReservationUpdateRequest request =
+        createSimpleReservationUpdateRequest(1, 1, 1, 5, 3, "600000");
+    plan = null;
+    try {
+      plan =
+          rrValidator.validateReservationUpdateRequest(rSystem, request);
+    } catch (YarnException e) {
+      Assert.fail(e.getMessage());
+    }
+    Assert.assertNotNull(plan);
+  }
+
+  @Test
+  public void testUpdateReservationNegativeRecurrenceExpression() {
+    ReservationUpdateRequest request =
+        createSimpleReservationUpdateRequest(1, 1, 1, 5, 3, "-1234");
+    plan = null;
+    try {
+      plan =
+          rrValidator.validateReservationUpdateRequest(rSystem, request);
+      Assert.fail();
+    } catch (YarnException e) {
+      Assert.assertNull(plan);
+      String message = e.getMessage();
+      Assert.assertTrue(message
+          .startsWith("Negative Period : "));
+      LOG.info(message);
+    }
+  }
+
+  @Test
+  public void testUpdateReservationInvalidRecurrenceExpression() {
+    // first check recurrence expression
+    ReservationUpdateRequest request =
+        createSimpleReservationUpdateRequest(1, 1, 1, 5, 3, "123abc");
+    plan = null;
+    try {
+      plan =
+          rrValidator.validateReservationUpdateRequest(rSystem, request);
+      Assert.fail();
+    } catch (YarnException e) {
+      Assert.assertNull(plan);
+      String message = e.getMessage();
+      Assert.assertTrue(message
+          .startsWith("Invalid period "));
+      LOG.info(message);
+    }
+
+    // now check duration
+    request =
+        createSimpleReservationUpdateRequest(1, 1, 1, 50, 3, "10");
+    plan = null;
+    try {
+      plan =
+          rrValidator.validateReservationUpdateRequest(rSystem, request);
+      Assert.fail();
+    } catch (YarnException e) {
+      Assert.assertNull(plan);
+      String message = e.getMessage();
+      Assert.assertTrue(message
+          .startsWith("Duration of the requested reservation:"));
       LOG.info(message);
     }
   }
@@ -625,12 +761,20 @@ public class TestReservationInputValidator {
   private ReservationSubmissionRequest createSimpleReservationSubmissionRequest(
       int numRequests, int numContainers, long arrival, long deadline,
       long duration) {
+    return createSimpleReservationSubmissionRequest(numRequests, numContainers,
+        arrival, deadline, duration, "0");
+  }
+
+  private ReservationSubmissionRequest createSimpleReservationSubmissionRequest(
+      int numRequests, int numContainers, long arrival, long deadline,
+      long duration, String recurrence) {
     // create a request with a single atomic ask
     ReservationSubmissionRequest request =
         new ReservationSubmissionRequestPBImpl();
     ReservationDefinition rDef = new ReservationDefinitionPBImpl();
     rDef.setArrival(arrival);
     rDef.setDeadline(deadline);
+    rDef.setRecurrenceExpression(recurrence);
     if (numRequests > 0) {
       ReservationRequests reqs = new ReservationRequestsPBImpl();
       rDef.setReservationRequests(reqs);
@@ -651,11 +795,19 @@ public class TestReservationInputValidator {
   private ReservationUpdateRequest createSimpleReservationUpdateRequest(
       int numRequests, int numContainers, long arrival, long deadline,
       long duration) {
+    return createSimpleReservationUpdateRequest(numRequests, numContainers,
+        arrival, deadline, duration, "0");
+  }
+
+  private ReservationUpdateRequest createSimpleReservationUpdateRequest(
+      int numRequests, int numContainers, long arrival, long deadline,
+      long duration, String recurrence) {
     // create a request with a single atomic ask
     ReservationUpdateRequest request = new ReservationUpdateRequestPBImpl();
     ReservationDefinition rDef = new ReservationDefinitionPBImpl();
     rDef.setArrival(arrival);
     rDef.setDeadline(deadline);
+    rDef.setRecurrenceExpression(recurrence);
     if (numRequests > 0) {
       ReservationRequests reqs = new ReservationRequestsPBImpl();
       rDef.setReservationRequests(reqs);

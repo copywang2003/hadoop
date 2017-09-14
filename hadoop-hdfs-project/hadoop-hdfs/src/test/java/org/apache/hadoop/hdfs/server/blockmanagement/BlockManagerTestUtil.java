@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 
@@ -55,6 +56,21 @@ public class BlockManagerTestUtil {
     }
   }
 
+  public static Iterator<BlockInfo> getBlockIterator(final FSNamesystem ns,
+      final String storageID, final int startBlock) {
+    ns.readLock();
+    try {
+      DatanodeDescriptor dn =
+          ns.getBlockManager().getDatanodeManager().getDatanode(storageID);
+      return dn.getBlockIterator(startBlock);
+    } finally {
+      ns.readUnlock();
+    }
+  }
+
+  public static Iterator<BlockInfo> getBlockIterator(DatanodeStorageInfo s) {
+    return s.getBlockIterator();
+  }
 
   /**
    * Refresh block queue counts on the name-node.
@@ -105,26 +121,30 @@ public class BlockManagerTestUtil {
   }
 
   /**
-   * @return replication monitor thread instance from block manager.
+   * @return redundancy monitor thread instance from block manager.
    */
-  public static Daemon getReplicationThread(final BlockManager blockManager)
-  {
-    return blockManager.replicationThread;
+  public static Daemon getRedundancyThread(final BlockManager blockManager) {
+    return blockManager.getRedundancyThread();
   }
-  
+
   /**
-   * Stop the replication monitor thread
+   * Stop the redundancy monitor thread.
    */
-  public static void stopReplicationThread(final BlockManager blockManager) 
+  public static void stopRedundancyThread(final BlockManager blockManager)
       throws IOException {
     blockManager.enableRMTerminationForTesting();
-    blockManager.replicationThread.interrupt();
+    blockManager.getRedundancyThread().interrupt();
     try {
-      blockManager.replicationThread.join();
-    } catch(InterruptedException ie) {
+      blockManager.getRedundancyThread().join();
+    } catch (InterruptedException ie) {
       throw new IOException(
-          "Interrupted while trying to stop ReplicationMonitor");
+          "Interrupted while trying to stop RedundancyMonitor");
     }
+  }
+
+  public static HeartbeatManager getHeartbeatManager(
+      final BlockManager blockManager) {
+    return blockManager.getDatanodeManager().getHeartbeatManager();
   }
 
   /**
@@ -215,7 +235,9 @@ public class BlockManagerTestUtil {
    * @param bm the BlockManager to manipulate
    */
   public static void checkHeartbeat(BlockManager bm) {
-    bm.getDatanodeManager().getHeartbeatManager().heartbeatCheck();
+    HeartbeatManager hbm = bm.getDatanodeManager().getHeartbeatManager();
+    hbm.restartHeartbeatStopWatch();
+    hbm.heartbeatCheck();
   }
 
   /**
@@ -294,7 +316,7 @@ public class BlockManagerTestUtil {
       StorageReport report = new StorageReport(
           dns ,false, storage.getCapacity(),
           storage.getDfsUsed(), storage.getRemaining(),
-          storage.getBlockPoolUsed());
+          storage.getBlockPoolUsed(), 0);
       reports.add(report);
     }
     return reports.toArray(StorageReport.EMPTY_ARRAY);
@@ -306,7 +328,7 @@ public class BlockManagerTestUtil {
    */
   public static void recheckDecommissionState(DatanodeManager dm)
       throws ExecutionException, InterruptedException {
-    dm.getDecomManager().runMonitorForTest();
+    dm.getDatanodeAdminManager().runMonitorForTest();
   }
 
   /**

@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -85,11 +86,11 @@ public class TestFileAppend4 {
     // handle under-replicated blocks quickly (for replication asserts)
     conf.setInt(
         DFSConfigKeys.DFS_NAMENODE_RECONSTRUCTION_PENDING_TIMEOUT_SEC_KEY, 5);
-    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1);
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY, 1);
     
     // handle failures in the DFSClient pipeline quickly
     // (for cluster.shutdown(); fs.close() idiom)
-    conf.setInt("ipc.client.connect.max.retries", 1);
+    conf.setInt(IPC_CLIENT_CONNECT_MAX_RETRIES_KEY, 1);
   }
   
   /*

@@ -35,12 +35,18 @@ import org.apache.hadoop.hdfs.server.namenode.startupprogress.StepType;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.util.Daemon;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
+
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_REPL_QUEUE_THRESHOLD_PCT_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SAFEMODE_MIN_DATANODES_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SAFEMODE_MIN_DATANODES_KEY;
@@ -96,7 +102,8 @@ class BlockManagerSafeMode {
   private long blockReplQueueThreshold;
 
   /** How long (in ms) is the extension period. */
-  private final int extension;
+  @VisibleForTesting
+  final long extension;
   /** Timestamp of the first time when thresholds are met. */
   private final AtomicLong reachedTime = new AtomicLong();
   /** Timestamp of the safe mode initialized. */
@@ -110,7 +117,9 @@ class BlockManagerSafeMode {
   private Counter awaitingReportedBlocksCounter;
 
   /** Keeps track of how many bytes are in Future Generation blocks. */
-  private final AtomicLong numberOfBytesInFutureBlocks = new AtomicLong();
+  private final LongAdder bytesInFutureBlocks = new LongAdder();
+  private final LongAdder bytesInFutureECBlockGroups = new LongAdder();
+
   /** Reports if Name node was started with Rollback option. */
   private final boolean inRollBack;
 
@@ -122,8 +131,8 @@ class BlockManagerSafeMode {
     this.threshold = conf.getFloat(DFS_NAMENODE_SAFEMODE_THRESHOLD_PCT_KEY,
         DFS_NAMENODE_SAFEMODE_THRESHOLD_PCT_DEFAULT);
     if (this.threshold > 1.0) {
-      LOG.warn("The threshold value should't be greater than 1, threshold: {}",
-          threshold);
+      LOG.warn("The threshold value shouldn't be greater than 1, " +
+          "threshold: {}", threshold);
     }
     this.datanodeThreshold = conf.getInt(
         DFS_NAMENODE_SAFEMODE_MIN_DATANODES_KEY,
@@ -143,7 +152,9 @@ class BlockManagerSafeMode {
     this.replQueueThreshold =
         conf.getFloat(DFS_NAMENODE_REPL_QUEUE_THRESHOLD_PCT_KEY,
             (float) threshold);
-    this.extension = conf.getInt(DFS_NAMENODE_SAFEMODE_EXTENSION_KEY, 0);
+    this.extension = conf.getTimeDuration(DFS_NAMENODE_SAFEMODE_EXTENSION_KEY,
+        DFS_NAMENODE_SAFEMODE_EXTENSION_DEFAULT,
+        MILLISECONDS);
 
     this.inRollBack = isInRollBackMode(NameNode.getStartupOption(conf));
 
@@ -164,7 +175,8 @@ class BlockManagerSafeMode {
     startTime = monotonicNow();
     setBlockTotal(total);
     if (areThresholdsMet()) {
-      leaveSafeMode(true);
+      boolean exitResult = leaveSafeMode(false);
+      Preconditions.checkState(exitResult, "Failed to leave safe mode.");
     } else {
       // enter safe mode
       status = BMSafeModeStatus.PENDING_THRESHOLD;
@@ -349,12 +361,13 @@ class BlockManagerSafeMode {
   boolean leaveSafeMode(boolean force) {
     assert namesystem.hasWriteLock() : "Leaving safe mode needs write lock!";
 
-    final long bytesInFuture = numberOfBytesInFutureBlocks.get();
+    final long bytesInFuture = getBytesInFuture();
     if (bytesInFuture > 0) {
       if (force) {
         LOG.warn("Leaving safe mode due to forceExit. This will cause a data "
             + "loss of {} byte(s).", bytesInFuture);
-        numberOfBytesInFutureBlocks.set(0);
+        bytesInFutureBlocks.reset();
+        bytesInFutureECBlockGroups.reset();
       } else {
         LOG.error("Refusing to leave safe mode without a force flag. " +
             "Exiting safe mode will cause a deletion of {} byte(s). Please " +
@@ -472,9 +485,12 @@ class BlockManagerSafeMode {
     }
 
     if (!blockManager.getShouldPostponeBlocksFromFuture() &&
-        !inRollBack &&
-        blockManager.isGenStampInFuture(brr)) {
-      numberOfBytesInFutureBlocks.addAndGet(brr.getBytesOnDisk());
+        !inRollBack && blockManager.isGenStampInFuture(brr)) {
+      if (BlockIdManager.isStripedBlockID(brr.getBlockId())) {
+        bytesInFutureECBlockGroups.add(brr.getBytesOnDisk());
+      } else {
+        bytesInFutureBlocks.add(brr.getBytesOnDisk());
+      }
     }
   }
 
@@ -485,7 +501,15 @@ class BlockManagerSafeMode {
    * @return Bytes in future
    */
   long getBytesInFuture() {
-    return numberOfBytesInFutureBlocks.get();
+    return getBytesInFutureBlocks() + getBytesInFutureECBlockGroups();
+  }
+
+  long getBytesInFutureBlocks() {
+    return bytesInFutureBlocks.longValue();
+  }
+
+  long getBytesInFutureECBlockGroups() {
+    return bytesInFutureECBlockGroups.longValue();
   }
 
   void close() {

@@ -15,113 +15,7 @@
 WebHDFS REST API
 ================
 
-* [WebHDFS REST API](#WebHDFS_REST_API)
-    * [Document Conventions](#Document_Conventions)
-    * [Introduction](#Introduction)
-        * [Operations](#Operations)
-        * [FileSystem URIs vs HTTP URLs](#FileSystem_URIs_vs_HTTP_URLs)
-        * [HDFS Configuration Options](#HDFS_Configuration_Options)
-    * [Authentication](#Authentication)
-    * [Proxy Users](#Proxy_Users)
-    * [Cross-Site Request Forgery Prevention](#Cross-Site_Request_Forgery_Prevention)
-    * [WebHDFS Retry Policy](#WebHDFS_Retry_Policy)
-    * [File and Directory Operations](#File_and_Directory_Operations)
-        * [Create and Write to a File](#Create_and_Write_to_a_File)
-        * [Append to a File](#Append_to_a_File)
-        * [Concat File(s)](#Concat_Files)
-        * [Open and Read a File](#Open_and_Read_a_File)
-        * [Make a Directory](#Make_a_Directory)
-        * [Create a Symbolic Link](#Create_a_Symbolic_Link)
-        * [Rename a File/Directory](#Rename_a_FileDirectory)
-        * [Delete a File/Directory](#Delete_a_FileDirectory)
-        * [Truncate a File](#Truncate_a_File)
-        * [Status of a File/Directory](#Status_of_a_FileDirectory)
-        * [List a Directory](#List_a_Directory)
-    * [Other File System Operations](#Other_File_System_Operations)
-        * [Get Content Summary of a Directory](#Get_Content_Summary_of_a_Directory)
-        * [Get File Checksum](#Get_File_Checksum)
-        * [Get Home Directory](#Get_Home_Directory)
-        * [Set Permission](#Set_Permission)
-        * [Set Owner](#Set_Owner)
-        * [Set Replication Factor](#Set_Replication_Factor)
-        * [Set Access or Modification Time](#Set_Access_or_Modification_Time)
-        * [Modify ACL Entries](#Modify_ACL_Entries)
-        * [Remove ACL Entries](#Remove_ACL_Entries)
-        * [Remove Default ACL](#Remove_Default_ACL)
-        * [Remove ACL](#Remove_ACL)
-        * [Set ACL](#Set_ACL)
-        * [Get ACL Status](#Get_ACL_Status)
-        * [Check access](#Check_access)
-    * [Extended Attributes(XAttrs) Operations](#Extended_AttributesXAttrs_Operations)
-        * [Set XAttr](#Set_XAttr)
-        * [Remove XAttr](#Remove_XAttr)
-        * [Get an XAttr](#Get_an_XAttr)
-        * [Get multiple XAttrs](#Get_multiple_XAttrs)
-        * [Get all XAttrs](#Get_all_XAttrs)
-        * [List all XAttrs](#List_all_XAttrs)
-    * [Snapshot Operations](#Snapshot_Operations)
-        * [Create Snapshot](#Create_Snapshot)
-        * [Delete Snapshot](#Delete_Snapshot)
-        * [Rename Snapshot](#Rename_Snapshot)
-    * [Delegation Token Operations](#Delegation_Token_Operations)
-        * [Get Delegation Token](#Get_Delegation_Token)
-        * [Renew Delegation Token](#Renew_Delegation_Token)
-        * [Cancel Delegation Token](#Cancel_Delegation_Token)
-    * [Error Responses](#Error_Responses)
-        * [HTTP Response Codes](#HTTP_Response_Codes)
-            * [Illegal Argument Exception](#Illegal_Argument_Exception)
-            * [Security Exception](#Security_Exception)
-            * [Access Control Exception](#Access_Control_Exception)
-            * [File Not Found Exception](#File_Not_Found_Exception)
-    * [JSON Schemas](#JSON_Schemas)
-        * [ACL Status JSON Schema](#ACL_Status_JSON_Schema)
-        * [XAttrs JSON Schema](#XAttrs_JSON_Schema)
-        * [XAttrNames JSON Schema](#XAttrNames_JSON_Schema)
-        * [Boolean JSON Schema](#Boolean_JSON_Schema)
-        * [ContentSummary JSON Schema](#ContentSummary_JSON_Schema)
-        * [FileChecksum JSON Schema](#FileChecksum_JSON_Schema)
-        * [FileStatus JSON Schema](#FileStatus_JSON_Schema)
-            * [FileStatus Properties](#FileStatus_Properties)
-        * [FileStatuses JSON Schema](#FileStatuses_JSON_Schema)
-        * [Long JSON Schema](#Long_JSON_Schema)
-        * [Path JSON Schema](#Path_JSON_Schema)
-        * [RemoteException JSON Schema](#RemoteException_JSON_Schema)
-        * [Token JSON Schema](#Token_JSON_Schema)
-            * [Token Properties](#Token_Properties)
-    * [HTTP Query Parameter Dictionary](#HTTP_Query_Parameter_Dictionary)
-        * [ACL Spec](#ACL_Spec)
-        * [XAttr Name](#XAttr_Name)
-        * [XAttr Value](#XAttr_Value)
-        * [XAttr set flag](#XAttr_set_flag)
-        * [XAttr value encoding](#XAttr_value_encoding)
-        * [Access Time](#Access_Time)
-        * [Block Size](#Block_Size)
-        * [Buffer Size](#Buffer_Size)
-        * [Create Flag](#Create_Flag)
-        * [Create Parent](#Create_Parent)
-        * [Delegation](#Delegation)
-        * [Destination](#Destination)
-        * [Do As](#Do_As)
-        * [Fs Action](#Fs_Action)
-        * [Group](#Group)
-        * [Length](#Length)
-        * [Modification Time](#Modification_Time)
-        * [Offset](#Offset)
-        * [Old Snapshot Name](#Old_Snapshot_Name)
-        * [Op](#Op)
-        * [Overwrite](#Overwrite)
-        * [Owner](#Owner)
-        * [Permission](#Permission)
-        * [Recursive](#Recursive)
-        * [Renewer](#Renewer)
-        * [Replication](#Replication)
-        * [Snapshot Name](#Snapshot_Name)
-        * [Sources](#Sources)
-        * [Token](#Token)
-        * [Token Kind](#Token_Kind)
-        * [Token Service](#Token_Service)
-        * [Username](#Username)
-        * [NoRedirect](#NoRedirect)
+<!-- MACRO{toc|fromDepth=0|toDepth=3} -->
 
 Document Conventions
 --------------------
@@ -143,15 +37,20 @@ The HTTP REST API supports the complete [FileSystem](../../api/org/apache/hadoop
     * [`OPEN`](#Open_and_Read_a_File) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).open)
     * [`GETFILESTATUS`](#Status_of_a_FileDirectory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileStatus)
     * [`LISTSTATUS`](#List_a_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listStatus)
+    * [`LISTSTATUS_BATCH`](#Iteratively_List_a_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listStatusIterator)
     * [`GETCONTENTSUMMARY`](#Get_Content_Summary_of_a_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getContentSummary)
     * [`GETFILECHECKSUM`](#Get_File_Checksum) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileChecksum)
     * [`GETHOMEDIRECTORY`](#Get_Home_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getHomeDirectory)
     * [`GETDELEGATIONTOKEN`](#Get_Delegation_Token) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getDelegationToken)
+    * [`GETTRASHROOT`](#Get_Trash_Root) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getTrashRoot)
     * [`GETXATTRS`](#Get_an_XAttr) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getXAttr)
     * [`GETXATTRS`](#Get_multiple_XAttrs) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getXAttrs)
     * [`GETXATTRS`](#Get_all_XAttrs) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getXAttrs)
     * [`LISTXATTRS`](#List_all_XAttrs) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listXAttrs)
     * [`CHECKACCESS`](#Check_access) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).access)
+    * [`GETALLSTORAGEPOLICY`](#Get_all_Storage_Policies) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getAllStoragePolicies)
+    * [`GETSTORAGEPOLICY`](#Get_Storage_Policy) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getStoragePolicy)
+    * [`GETFILEBLOCKLOCATIONS`](#Get_File_Block_Locations) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileBlockLocations)
 *   HTTP PUT
     * [`CREATE`](#Create_and_Write_to_a_File) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).create)
     * [`MKDIRS`](#Make_a_Directory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).mkdirs)
@@ -167,10 +66,12 @@ The HTTP REST API supports the complete [FileSystem](../../api/org/apache/hadoop
     * [`RENAMESNAPSHOT`](#Rename_Snapshot) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).renameSnapshot)
     * [`SETXATTR`](#Set_XAttr) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).setXAttr)
     * [`REMOVEXATTR`](#Remove_XAttr) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).removeXAttr)
+    * [`SETSTORAGEPOLICY`](#Set_Storage_Policy) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).setStoragePolicy)
 *   HTTP POST
     * [`APPEND`](#Append_to_a_File) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).append)
     * [`CONCAT`](#Concat_Files) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).concat)
-    * [`TRUNCATE`](#Truncate_a_File) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).concat)
+    * [`TRUNCATE`](#Truncate_a_File) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).truncate)
+    * [`UNSETSTORAGEPOLICY`](#Unset_Storage_Policy) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).unsetStoragePolicy)
 *   HTTP DELETE
     * [`DELETE`](#Delete_a_FileDirectory) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).delete)
     * [`DELETESNAPSHOT`](#Delete_Snapshot) (see [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).deleteSnapshot)
@@ -188,6 +89,11 @@ The above WebHDFS URI corresponds to the below HDFS URI.
 In the REST API, the prefix "`/webhdfs/v1`" is inserted in the path and a query is appended at the end. Therefore, the corresponding HTTP URL has the following format.
 
       http://<HOST>:<HTTP_PORT>/webhdfs/v1/<PATH>?op=...
+
+**Note** that if WebHDFS is secured with SSL, then the scheme should be "`swebhdfs://`".
+
+      swebhdfs://<HOST>:<HTTP_PORT>/<PATH>
+
 
 ### HDFS Configuration Options
 
@@ -576,7 +482,7 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileSt
                 "group"           : "supergroup",
                 "length"          : 0,
                 "modificationTime": 1320895981256,
-                "owner"           : "szetszwo",
+                "owner"           : "username",
                 "pathSuffix"      : "bar",
                 "permission"      : "711",
                 "replication"     : 0,
@@ -588,6 +494,174 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileSt
         }
 
 See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listStatus
+
+### List a File
+
+* Submit a HTTP GET request.
+
+        curl -i  "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=LISTSTATUS"
+
+    The client receives a response with a [`FileStatuses` JSON object](#FileStatuses_JSON_Schema):
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        Content-Length: 427
+
+        {
+          "FileStatuses":
+          {
+            "FileStatus":
+            [
+              {
+                "accessTime"      : 1320171722771,
+                "blockSize"       : 33554432,
+                "childrenNum"     : 0,
+                "fileId"          : 16390,
+                "group"           : "supergroup",
+                "length"          : 1366,
+                "modificationTime": 1501770633062,
+                "owner"           : "webuser",
+                "pathSuffix"      : "",
+                "permission"      : "644",
+                "replication"     : 1,
+                "storagePolicy"   : 0,
+                "type"            : "FILE"
+              }
+            ]
+          }
+        }
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listStatus
+
+
+### Iteratively List a Directory
+
+* Submit a HTTP GET request.
+
+        curl -i  "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=LISTSTATUS_BATCH&startAfter=<CHILD>"
+
+    The client receives a response with a [`DirectoryListing` JSON object](#DirectoryListing_JSON_Schema), which contains a [`FileStatuses` JSON object](#FileStatuses_JSON_Schema), as well as iteration information:
+
+        HTTP/1.1 200 OK
+        Cache-Control: no-cache
+        Expires: Thu, 08 Sep 2016 03:40:38 GMT
+        Date: Thu, 08 Sep 2016 03:40:38 GMT
+        Pragma: no-cache
+        Expires: Thu, 08 Sep 2016 03:40:38 GMT
+        Date: Thu, 08 Sep 2016 03:40:38 GMT
+        Pragma: no-cache
+        Content-Type: application/json
+        X-FRAME-OPTIONS: SAMEORIGIN
+        Transfer-Encoding: chunked
+        Server: Jetty(6.1.26)
+
+        {
+            "DirectoryListing": {
+                "partialListing": {
+                    "FileStatuses": {
+                        "FileStatus": [
+                            {
+                                "accessTime": 0,
+                                "blockSize": 0,
+                                "childrenNum": 0,
+                                "fileId": 16387,
+                                "group": "supergroup",
+                                "length": 0,
+                                "modificationTime": 1473305882563,
+                                "owner": "andrew",
+                                "pathSuffix": "bardir",
+                                "permission": "755",
+                                "replication": 0,
+                                "storagePolicy": 0,
+                                "type": "DIRECTORY"
+                            },
+                            {
+                                "accessTime": 1473305896945,
+                                "blockSize": 1024,
+                                "childrenNum": 0,
+                                "fileId": 16388,
+                                "group": "supergroup",
+                                "length": 0,
+                                "modificationTime": 1473305896965,
+                                "owner": "andrew",
+                                "pathSuffix": "bazfile",
+                                "permission": "644",
+                                "replication": 3,
+                                "storagePolicy": 0,
+                                "type": "FILE"
+                            }
+                        ]
+                    }
+                },
+                "remainingEntries": 2
+            }
+        }
+
+If `remainingEntries` is non-zero, there are additional entries in the directory.
+To query the next batch, set the `startAfter` parameter to the `pathSuffix` of the last item returned in the current batch. For example:
+
+        curl -i  "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=LISTSTATUS_BATCH&startAfter=bazfile"
+
+Which will return the next batch of directory entries:
+
+        HTTP/1.1 200 OK
+        Cache-Control: no-cache
+        Expires: Thu, 08 Sep 2016 03:43:20 GMT
+        Date: Thu, 08 Sep 2016 03:43:20 GMT
+        Pragma: no-cache
+        Expires: Thu, 08 Sep 2016 03:43:20 GMT
+        Date: Thu, 08 Sep 2016 03:43:20 GMT
+        Pragma: no-cache
+        Content-Type: application/json
+        X-FRAME-OPTIONS: SAMEORIGIN
+        Transfer-Encoding: chunked
+        Server: Jetty(6.1.26)
+
+        {
+            "DirectoryListing": {
+                "partialListing": {
+                    "FileStatuses": {
+                        "FileStatus": [
+                            {
+                                "accessTime": 0,
+                                "blockSize": 0,
+                                "childrenNum": 0,
+                                "fileId": 16386,
+                                "group": "supergroup",
+                                "length": 0,
+                                "modificationTime": 1473305878951,
+                                "owner": "andrew",
+                                "pathSuffix": "foodir",
+                                "permission": "755",
+                                "replication": 0,
+                                "storagePolicy": 0,
+                                "type": "DIRECTORY"
+                            },
+                            {
+                                "accessTime": 1473305902864,
+                                "blockSize": 1024,
+                                "childrenNum": 0,
+                                "fileId": 16389,
+                                "group": "supergroup",
+                                "length": 0,
+                                "modificationTime": 1473305902878,
+                                "owner": "andrew",
+                                "pathSuffix": "quxfile",
+                                "permission": "644",
+                                "replication": 3,
+                                "storagePolicy": 0,
+                                "type": "FILE"
+                            }
+                        ]
+                    }
+                },
+                "remainingEntries": 0
+            }
+        }
+
+Batch size is controlled by the `dfs.ls.limit` option on the NameNode.
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).listStatusIterator
 
 Other File System Operations
 ----------------------------
@@ -684,9 +758,35 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileCh
         Content-Type: application/json
         Transfer-Encoding: chunked
 
-        {"Path": "/user/szetszwo"}
+        {"Path": "/user/username"}
 
 See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getHomeDirectory
+
+### Get Trash Root
+
+* Submit a HTTP GET request.
+
+        curl -i "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=GETTRASHROOT"
+
+    The client receives a response with a [`Path` JSON object](#Path_JSON_Schema):
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        Transfer-Encoding: chunked
+
+        {"Path": "/user/username/.Trash"}
+
+    if the path is an encrypted zone path and user has permission of the path, the client receives a response like this:
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        Transfer-Encoding: chunked
+
+        {"Path": "/PATH/.Trash/username"}
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getTrashRoot
+
+For more details about trash root in an encrypted zone, please refer to [Transparent Encryption Guide](./TransparentEncryption.html#Rename_and_Trash_considerations).
 
 ### Set Permission
 
@@ -856,6 +956,174 @@ See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getAclSta
 
 See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).access
 
+Storage Policy Operations
+-------------------------
+
+### Get all Storage Policies
+
+* Submit a HTTP GET request.
+
+        curl -i "http://<HOST>:<PORT>/webhdfs/v1?op=GETALLSTORAGEPOLICY"
+
+    The client receives a response with a [`BlockStoragePolicies` JSON object](#BlockStoragePolicies_JSON_Schema):
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        Transfer-Encoding: chunked
+
+        {
+            "BlockStoragePolicies": {
+                "BlockStoragePolicy": [
+                   {
+                       "copyOnCreateFile": false,
+                       "creationFallbacks": [],
+                       "id": 2,
+                       "name": "COLD",
+                       "replicationFallbacks": [],
+                       "storageTypes": ["ARCHIVE"]
+                   },
+                   {
+                       "copyOnCreateFile": false,
+                       "creationFallbacks": ["DISK","ARCHIVE"],
+                       "id": 5,
+                       "name": "WARM",
+                       "replicationFallbacks": ["DISK","ARCHIVE"],
+                       "storageTypes": ["DISK","ARCHIVE"]
+                   },
+                   {
+                       "copyOnCreateFile": false,
+                       "creationFallbacks": [],
+                       "id": 7,
+                       "name": "HOT",
+                       "replicationFallbacks": ["ARCHIVE"],
+                       "storageTypes": ["DISK"]
+                   },
+                   {
+                       "copyOnCreateFile": false,
+                       "creationFallbacks": ["SSD","DISK"],
+                       "id": 10,"name": "ONE_SSD",
+                       "replicationFallbacks": ["SSD","DISK"],
+                       "storageTypes": ["SSD","DISK"]
+                   },
+                   {
+                       "copyOnCreateFile": false,
+                       "creationFallbacks": ["DISK"],
+                       "id": 12,
+                       "name": "ALL_SSD",
+                       "replicationFallbacks": ["DISK"],
+                       "storageTypes": ["SSD"]
+                   },
+                   {
+                       "copyOnCreateFile": true,
+                       "creationFallbacks": ["DISK"],
+                       "id": 15,
+                       "name": "LAZY_PERSIST",
+                       "replicationFallbacks": ["DISK"],
+                       "storageTypes": ["RAM_DISK","DISK"]
+                   }
+               ]
+           }
+        }
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getAllStoragePolicies
+
+### Set Storage Policy
+
+* Submit a HTTP PUT request.
+
+        curl -i -X PUT "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=SETSTORAGEPOLICY
+                                      &storagepolicy=<policy>"
+
+    The client receives a response with zero content length:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).setStoragePolicy
+
+### Unset Storage Policy
+
+* Submit a HTTP POT request.
+
+        curl -i -X POST "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=UNSETSTORAGEPOLICY"
+
+    The client receives a response with zero content length:
+
+        HTTP/1.1 200 OK
+        Content-Length: 0
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).unsetStoragePolicy
+
+### Get Storage Policy
+
+* Submit a HTTP GET request.
+
+        curl -i "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=GETSTORAGEPOLICY"
+
+    The client receives a response with a [`BlockStoragePolicy` JSON object](#BlockStoragePolicy_JSON_Schema):
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        Transfer-Encoding: chunked
+
+        {
+            "BlockStoragePolicy": {
+                "copyOnCreateFile": false,
+                "creationFallbacks": [],
+                "id":7,
+                "name":"HOT",
+                "replicationFallbacks":["ARCHIVE"],
+                "storageTypes":["DISK"]
+            }
+        }
+
+See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getStoragePolicy
+
+### Get File Block Locations
+
+* Submit a HTTP GET request.
+
+        curl -i "http://<HOST>:<PORT>/webhdfs/v1/<PATH>?op=GETFILEBLOCKLOCATIONS
+
+    The client receives a response with a [`BlockLocations` JSON Object](#Block_Locations_JSON_Schema):
+
+        HTTP/1.1 200 OK
+        Content-Type: application/json
+        Transfer-Encoding: chunked
+
+        {
+          "BlockLocations" :
+          {
+            "BlockLocation":
+            [
+              {
+                "cachedHosts" : [],
+                "corrupt" : false,
+                "hosts" : ["host"],
+                "length" : 134217728,                             // length of this block
+                "names" : ["host:ip"],
+                "offset" : 0,                                     // offset of the block in the file
+                "storageIds" : ["storageid"],
+                "storageTypes" : ["DISK"],                        // enum {RAM_DISK, SSD, DISK, ARCHIVE}
+                "topologyPaths" : ["/default-rack/hostname:ip"]
+              }, {
+                "cachedHosts" : [],
+                "corrupt" : false,
+                "hosts" : ["host"],
+                "length" : 62599364,
+                "names" : ["host:ip"],
+                "offset" : 134217728,
+                "storageIds" : ["storageid"],
+                "storageTypes" : ["DISK"],
+                "topologyPaths" : ["/default-rack/hostname:ip"]
+              },
+              ...
+            ]
+          }
+        }
+
+See also: [`offset`](#Offset), [`length`](#Length), [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).getFileBlockLocations
+
 Extended Attributes(XAttrs) Operations
 --------------------------------------
 
@@ -1006,7 +1274,7 @@ Snapshot Operations
         Content-Type: application/json
         Transfer-Encoding: chunked
 
-        {"Path": "/user/szetszwo/.snapshot/s1"}
+        {"Path": "/user/username/.snapshot/s1"}
 
 See also: [FileSystem](../../api/org/apache/hadoop/fs/FileSystem.html).createSnapshot
 
@@ -1044,7 +1312,8 @@ Delegation Token Operations
 
 * Submit a HTTP GET request.
 
-        curl -i "http://<HOST>:<PORT>/webhdfs/v1/?op=GETDELEGATIONTOKEN&renewer=<USER>&service=<SERVICE>&kind=<KIND>"
+        curl -i "http://<HOST>:<PORT>/webhdfs/v1/?op=GETDELEGATIONTOKEN
+                    [&renewer=<USER>][&service=<SERVICE>][&kind=<KIND>]"
 
     The client receives a response with a [`Token` JSON object](#Token_JSON_Schema):
 
@@ -1189,7 +1458,7 @@ All operations, except for [`OPEN`](#Open_and_Read_a_File), either return a zero
       {
         "entries":
         {
-          "type": "array"
+          "type": "array",
           "items":
           {
             "description": "ACL entry.",
@@ -1213,7 +1482,7 @@ All operations, except for [`OPEN`](#Open_and_Read_a_File), either return a zero
           "description": "True if the sticky bit is on.",
           "type"       : "boolean",
           "required"   : true
-        },
+        }
       }
     }
   }
@@ -1232,7 +1501,7 @@ All operations, except for [`OPEN`](#Open_and_Read_a_File), either return a zero
       "type"      : "array",
       "items":
       {
-        "type"    " "object",
+        "type"    : "object",
         "properties":
         {
           "name":
@@ -1263,7 +1532,7 @@ All operations, except for [`OPEN`](#Open_and_Read_a_File), either return a zero
     "XAttrNames":
     {
       "description": "XAttr names.",
-      "type"       : "string"
+      "type"       : "string",
       "required"   : true
     }
   }
@@ -1567,6 +1836,41 @@ A `FileStatuses` JSON object represents an array of `FileStatus` JSON objects.
 
 See also: [`FileStatus` Properties](#FileStatus_Properties), [`LISTSTATUS`](#List_a_Directory), [FileStatus](../../api/org/apache/hadoop/fs/FileStatus.html)
 
+### DirectoryListing JSON Schema
+
+A `DirectoryListing` JSON object represents a batch of directory entries while iteratively listing a directory. It contains a `FileStatuses` JSON object as well as iteration information.
+
+```json
+{
+  "name"      : "DirectoryListing",
+  "properties":
+  {
+    "DirectoryListing":
+    {
+      "type"      : "object",
+      "properties":
+      {
+        "partialListing":
+        {
+          "description": "A partial directory listing",
+          "type"       : "object", // A FileStatuses object
+          "required"   : true
+        },
+        "remainingEntries":
+        {
+          "description": "Number of remaining entries",
+          "type"       : "integer",
+          "required"   : true
+        }
+      }
+    }
+  }
+
+}
+```
+
+See also: [`FileStatuses` JSON Schema](#FileStatuses_JSON_Schema), [`LISTSTATUS_BATCH`](#Iteratively_List_a_Directory), [FileStatus](../../api/org/apache/hadoop/fs/FileStatus.html)
+
 ### Long JSON Schema
 
 ```json
@@ -1632,7 +1936,7 @@ See also: [`GETHOMEDIRECTORY`](#Get_Home_Directory), [Path](../../api/org/apache
         "javaClassName":                                     //an optional property
         {
           "description": "Java class name of the exception",
-          "type"       : "string",
+          "type"       : "string"
         }
       }
     }
@@ -1676,6 +1980,247 @@ var tokenProperties =
 ```
 
 See also: [`Token` Properties](#Token_Properties), the note in [Delegation](#Delegation).
+### BlockStoragePolicy JSON Schema
+
+```json
+{
+  "name"      : "BlockStoragePolicy",
+  "properties":
+  {
+    "BlockStoragePolicy": blockStoragePolicyProperties      //See BlockStoragePolicy Properties
+  }
+}
+```
+
+See also: [`BlockStoragePolicy` Properties](#BlockStoragePolicy_Properties), [`GETSTORAGEPOLICY`](#Get_Storage_Policy)
+
+#### BlockStoragePolicy Properties
+
+JavaScript syntax is used to define `blockStoragePolicyProperties` so that it can be referred in both `BlockStoragePolicy` and `BlockStoragePolicies` JSON schemas.
+
+```javascript
+var blockStoragePolicyProperties =
+{
+  "type"      : "object",
+  "properties":
+  {
+    "id":
+    {
+      "description": "Policy ID.",
+      "type"       : "integer",
+      "required"   : true
+    },
+    "name":
+    {
+      "description": "Policy name.",
+      "type"       : "string",
+      "required"   : true
+    },
+    "storageTypes":
+    {
+      "description": "An array of storage types for block placement.",
+      "type"       : "array",
+      "required"   : true
+      "items"      :
+      {
+        "type": "string"
+      }
+    },
+    "replicationFallbacks":
+    {
+      "description": "An array of fallback storage types for replication.",
+      "type"       : "array",
+      "required"   : true
+      "items"      :
+      {
+        "type": "string"
+      }
+    },
+    "creationFallbacks":
+    {
+      "description": "An array of fallback storage types for file creation.",
+      "type"       : "array",
+      "required"   : true
+      "items"      :
+      {
+       "type": "string"
+      }
+    },
+    "copyOnCreateFile":
+    {
+      "description": "If set then the policy cannot be changed after file creation.",
+      "type"       : "boolean",
+      "required"   : true
+    }
+  }
+};
+```
+
+### BlockStoragePolicies JSON Schema
+
+A `BlockStoragePolicies` JSON object represents an array of `BlockStoragePolicy` JSON objects.
+
+```json
+{
+  "name"      : "BlockStoragePolicies",
+  "properties":
+  {
+    "BlockStoragePolicies":
+    {
+      "type"      : "object",
+      "properties":
+      {
+        "BlockStoragePolicy":
+        {
+          "description": "An array of BlockStoragePolicy",
+          "type"       : "array",
+          "items"      : blockStoragePolicyProperties      //See BlockStoragePolicy Properties
+        }
+      }
+    }
+  }
+}
+```
+
+#### BlockLocations JSON Schema
+
+A `BlockLocations` JSON object represents an array of `BlockLocation` JSON objects.
+
+```json
+{
+  "name"      : "BlockLocations",
+  "properties":
+  {
+    "BlockLocations":
+    {
+      "type"      : "object",
+      "properties":
+      {
+        "BlockLocation":
+        {
+          "description": "An array of BlockLocation",
+          "type"       : "array",
+          "items"      : blockLocationProperties      //See BlockLocation Properties
+        }
+      }
+    }
+  }
+}
+```
+
+See also [`BlockLocation` Properties](#BlockLocation_Properties), [`GETFILEBLOCKLOCATIONS`](#Get_File_Block_Locations), [BlockLocation](../../api/org/apache/hadoop/fs/BlockLocation.html)
+
+### BlockLocation JSON Schema
+
+```json
+{
+  "name"      : "BlockLocation",
+  "properties":
+  {
+    "BlockLocation": blockLocationProperties      //See BlockLocation Properties
+  }
+}
+```
+
+See also [`BlockLocation` Properties](#BlockLocation_Properties), [`GETFILEBLOCKLOCATIONS`](#Get_File_Block_Locations), [BlockLocation](../../api/org/apache/hadoop/fs/BlockLocation.html)
+
+#### BlockLocation Properties
+
+JavaScript syntax is used to define `blockLocationProperties` so that it can be referred in both `BlockLocation` and `BlockLocations` JSON schemas.
+
+```javascript
+var blockLocationProperties =
+{
+  "type"      : "object",
+  "properties":
+  {
+    "cachedHosts":
+    {
+      "description": "Datanode hostnames with a cached replica",
+      "type"       : "array",
+      "required"   : "true",
+      "items"      :
+      {
+        "description": "A datanode hostname",
+        "type"       : "string"
+      }
+    },
+    "corrupt":
+    {
+      "description": "True if the block is corrupted",
+      "type"       : "boolean",
+      "required"   : "true"
+    },
+    "hosts":
+    {
+      "description": "Datanode hostnames store the block",
+      "type"       : "array",
+      "required"   : "true",
+      "items"      :
+      {
+        "description": "A datanode hostname",
+        "type"       : "string"
+      }
+    },
+    "length":
+    {
+      "description": "Length of the block",
+      "type"       : "integer",
+      "required"   : "true"
+    },
+    "names":
+    {
+      "description": "Datanode IP:xferPort for accessing the block",
+      "type"       : "array",
+      "required"   : "true",
+      "items"      :
+      {
+        "description": "DatanodeIP:xferPort",
+        "type"       : "string"
+      }
+    },
+    "offset":
+    {
+      "description": "Offset of the block in the file",
+      "type"       : "integer",
+      "required"   : "true"
+    },
+    "storageIds":
+    {
+      "description": "Storage ID of each replica",
+      "type"       : "array",
+      "required"   : "true",
+      "items"      :
+      {
+        "description": "Storage ID",
+        "type"       : "string"
+      }
+    },
+    "storageTypes":
+    {
+      "description": "Storage type of each replica",
+      "type"       : "array",
+      "required"   : "true",
+      "items"      :
+      {
+        "description": "Storage type",
+        "enum"       : ["RAM_DISK", "SSD", "DISK", "ARCHIVE"]
+      }
+    },
+    "topologyPaths":
+    {
+      "description": "Datanode addresses in network topology",
+      "type"       : "array",
+      "required"   : "true",
+      "items"      :
+      {
+        "description": "/rack/host:ip",
+        "type"       : "string"
+      }
+    }
+  }
+};
+```
 
 HTTP Query Parameter Dictionary
 -------------------------------
@@ -2086,3 +2631,27 @@ See also: [Authentication](#Authentication)
 | Syntax | true |
 
 See also: [Create and Write to a File](#Create_and_Write_to_a_File)
+
+### Storage Policy
+
+| Name | `storagepolicy` |
+|:---- |:---- |
+| Description | The name of the storage policy. |
+| Type | String |
+| Default Value | \<empty\> |
+| Valid Values | Any valid storage policy name; see [GETALLSTORAGEPOLICY](#Get_all_Storage_Policies).  |
+| Syntax | Any string. |
+
+See also: [`SETSTORAGEPOLICY`](#Set_Storage_Policy)
+
+### Start After
+
+| Name | `startAfter` |
+|:---- |:---- |
+| Description | The last item returned in the liststatus batch. |
+| Type | String |
+| Default Value | \<empty\> |
+| Valid Values | Any valid file/directory name. |
+| Syntax | Any string. |
+
+See also: [`LISTSTATUS_BATCH`](#Iteratively_List_a_Directory)

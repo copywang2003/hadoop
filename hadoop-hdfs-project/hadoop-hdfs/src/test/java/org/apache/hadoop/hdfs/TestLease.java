@@ -30,6 +30,7 @@ import java.io.DataOutputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.security.PrivilegedExceptionAction;
+import java.util.EnumSet;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -353,17 +354,20 @@ public class TestLease {
 
     Mockito.doReturn(
         new HdfsFileStatus(0, false, 1, 1024, 0, 0, new FsPermission(
-            (short) 777), "owner", "group", new byte[0], new byte[0],
+            (short) 777), EnumSet.noneOf(HdfsFileStatus.Flags.class),
+            "owner", "group", new byte[0], new byte[0],
             1010, 0, null, (byte) 0, null)).when(mcp).getFileInfo(anyString());
     Mockito
         .doReturn(
             new HdfsFileStatus(0, false, 1, 1024, 0, 0, new FsPermission(
-                (short) 777), "owner", "group", new byte[0], new byte[0],
+                (short) 777), EnumSet.noneOf(HdfsFileStatus.Flags.class),
+                "owner", "group", new byte[0], new byte[0],
                 1010, 0, null, (byte) 0, null))
         .when(mcp)
         .create(anyString(), (FsPermission) anyObject(), anyString(),
             (EnumSetWritable<CreateFlag>) anyObject(), anyBoolean(),
-            anyShort(), anyLong(), (CryptoProtocolVersion[]) anyObject());
+            anyShort(), anyLong(), (CryptoProtocolVersion[]) anyObject(),
+            anyObject());
 
     final Configuration conf = new Configuration();
     final DFSClient c1 = createDFSClientAs(ugi[0], conf);

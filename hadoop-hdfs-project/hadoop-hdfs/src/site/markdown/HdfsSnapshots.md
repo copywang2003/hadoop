@@ -18,21 +18,7 @@
 HDFS Snapshots
 ==============
 
-* [HDFS Snapshots](#HDFS_Snapshots)
-    * [Overview](#Overview)
-        * [Snapshottable Directories](#Snapshottable_Directories)
-        * [Snapshot Paths](#Snapshot_Paths)
-    * [Upgrading to a version of HDFS with snapshots](#Upgrading_to_a_version_of_HDFS_with_snapshots)
-    * [Snapshot Operations](#Snapshot_Operations)
-        * [Administrator Operations](#Administrator_Operations)
-            * [Allow Snapshots](#Allow_Snapshots)
-            * [Disallow Snapshots](#Disallow_Snapshots)
-        * [User Operations](#User_Operations)
-            * [Create Snapshots](#Create_Snapshots)
-            * [Delete Snapshots](#Delete_Snapshots)
-            * [Rename Snapshots](#Rename_Snapshots)
-            * [Get Snapshottable Directory Listing](#Get_Snapshottable_Directory_Listing)
-            * [Get Snapshots Difference Report](#Get_Snapshots_Difference_Report)
+<!-- MACRO{toc|fromDepth=0|toDepth=3} -->
 
 
 Overview
@@ -113,7 +99,7 @@ Upgrading to a version of HDFS with snapshots
 
 The HDFS snapshot feature introduces a new reserved path name used to
 interact with snapshots: `.snapshot`. When upgrading from an
-older version of HDFS, existing paths named `.snapshot` need
+older version of HDFS which does not support snapshots, existing paths named `.snapshot` need
 to first be renamed or deleted to avoid conflicting with the reserved path.
 See the upgrade section in
 [the HDFS user guide](HdfsUserGuide.html#Upgrade_and_Rollback)

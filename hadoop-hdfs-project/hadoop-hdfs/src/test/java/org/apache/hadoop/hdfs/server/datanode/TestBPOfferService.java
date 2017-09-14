@@ -18,8 +18,10 @@
 package org.apache.hadoop.hdfs.server.datanode;
 
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_DATA_DIR_KEY;
+import org.apache.hadoop.hdfs.server.protocol.SlowDiskReports;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
@@ -55,6 +57,7 @@ import org.apache.hadoop.hdfs.server.protocol.NNHAStatusHeartbeat;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
 import org.apache.hadoop.hdfs.server.protocol.RegisterCommand;
+import org.apache.hadoop.hdfs.server.protocol.SlowPeerReports;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
@@ -116,9 +119,9 @@ public class TestBPOfferService {
     File dnDataDir = new File(new File(TEST_BUILD_DATA, "dfs"), "data");
     conf.set(DFS_DATANODE_DATA_DIR_KEY, dnDataDir.toURI().toString());
     Mockito.doReturn(conf).when(mockDn).getConf();
-    Mockito.doReturn(new DNConf(conf)).when(mockDn).getDnConf();
+    Mockito.doReturn(new DNConf(mockDn)).when(mockDn).getDnConf();
     Mockito.doReturn(DataNodeMetrics.create(conf, "fake dn"))
-    .when(mockDn).getMetrics();
+        .when(mockDn).getMetrics();
 
     // Set up a simulated dataset with our fake BP
     mockFSDataset = Mockito.spy(new SimulatedFSDataset(null, conf));
@@ -151,7 +154,9 @@ public class TestBPOfferService {
           Mockito.anyInt(),
           Mockito.anyInt(),
           Mockito.any(VolumeFailureSummary.class),
-          Mockito.anyBoolean());
+          Mockito.anyBoolean(),
+          Mockito.any(SlowPeerReports.class),
+          Mockito.any(SlowDiskReports.class));
     mockHaStatuses[nnIdx] = new NNHAStatusHeartbeat(HAServiceState.STANDBY, 0);
     datanodeCommands[nnIdx] = new DatanodeCommand[0];
     return mock;
@@ -218,6 +223,35 @@ public class TestBPOfferService {
       bpos.stop();
       bpos.join();
     }
+  }
+
+  @Test
+  public void testLocklessBlockPoolId() throws Exception {
+    BPOfferService bpos = Mockito.spy(setupBPOSForNNs(mockNN1));
+
+    // bpNSInfo is not set, should take lock to check nsInfo.
+    assertNull(bpos.getBlockPoolId());
+    Mockito.verify(bpos).readLock();
+
+    // setting the bpNSInfo should cache the bp id, thus no locking.
+    Mockito.reset(bpos);
+    NamespaceInfo nsInfo = new NamespaceInfo(1, FAKE_CLUSTERID, FAKE_BPID, 0);
+    assertNull(bpos.setNamespaceInfo(nsInfo));
+    assertEquals(FAKE_BPID, bpos.getBlockPoolId());
+    Mockito.verify(bpos, Mockito.never()).readLock();
+
+    // clearing the bpNSInfo should clear the cached bp id, thus requiring
+    // locking to check the bpNSInfo.
+    Mockito.reset(bpos);
+    assertEquals(nsInfo, bpos.setNamespaceInfo(null));
+    assertNull(bpos.getBlockPoolId());
+    Mockito.verify(bpos).readLock();
+
+    // test setting it again.
+    Mockito.reset(bpos);
+    assertNull(bpos.setNamespaceInfo(nsInfo));
+    assertEquals(FAKE_BPID, bpos.getBlockPoolId());
+    Mockito.verify(bpos, Mockito.never()).readLock();
   }
 
   /**
@@ -338,7 +372,7 @@ public class TestBPOfferService {
       new File(TEST_BUILD_DATA, "testBPInitErrorHandling"), "data");
     conf.set(DFS_DATANODE_DATA_DIR_KEY, dnDataDir.toURI().toString());
     Mockito.doReturn(conf).when(mockDn).getConf();
-    Mockito.doReturn(new DNConf(conf)).when(mockDn).getDnConf();
+    Mockito.doReturn(new DNConf(mockDn)).when(mockDn).getDnConf();
     Mockito.doReturn(DataNodeMetrics.create(conf, "fake dn")).
       when(mockDn).getMetrics();
     final AtomicInteger count = new AtomicInteger();
@@ -407,7 +441,7 @@ public class TestBPOfferService {
           Mockito.eq(new InetSocketAddress(port)));
     }
 
-    return new BPOfferService(Lists.newArrayList(nnMap.keySet()),
+    return new BPOfferService("test_ns", Lists.newArrayList(nnMap.keySet()),
         Collections.<InetSocketAddress>nCopies(nnMap.size(), null), mockDn);
   }
 
@@ -798,5 +832,36 @@ public class TestBPOfferService {
       }
     }
     return -1;
+  }
+
+   /*
+    *
+    */
+  @Test
+  public void testNNHAStateUpdateFromVersionRequest() throws Exception {
+    final BPOfferService bpos = setupBPOSForNNs(mockNN1, mockNN2);
+    Mockito.doReturn(true).when(mockDn).areHeartbeatsDisabledForTests();
+    BPServiceActor actor = bpos.getBPServiceActors().get(0);
+    bpos.start();
+    waitForInitialization(bpos);
+    // Should start with neither NN as active.
+    assertNull(bpos.getActiveNN());
+
+    // getNamespaceInfo() will not include HAServiceState
+    NamespaceInfo nsInfo = mockNN1.versionRequest();
+    bpos.verifyAndSetNamespaceInfo(actor, nsInfo);
+
+    assertNull(bpos.getActiveNN());
+
+    // Change mock so getNamespaceInfo() will include HAServiceState
+    Mockito.doReturn(new NamespaceInfo(1, FAKE_CLUSTERID, FAKE_BPID, 0,
+        HAServiceState.ACTIVE)).when(mockNN1).versionRequest();
+
+    // Update the bpos NamespaceInfo
+    nsInfo = mockNN1.versionRequest();
+    bpos.verifyAndSetNamespaceInfo(actor, nsInfo);
+
+    assertNotNull(bpos.getActiveNN());
+
   }
 }

@@ -47,6 +47,7 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoStriped;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.namenode.FSImageFormatProtobuf.LoaderContext;
 import org.apache.hadoop.hdfs.server.namenode.FSImageFormatProtobuf.SaverContext;
@@ -281,18 +282,14 @@ public final class FSImageFormatPBINode {
      * Load the under-construction files section, and update the lease map
      */
     void loadFilesUnderConstructionSection(InputStream in) throws IOException {
+      // Leases are added when the inode section is loaded. This section is
+      // still read in for compatibility reasons.
       while (true) {
         FileUnderConstructionEntry entry = FileUnderConstructionEntry
             .parseDelimitedFrom(in);
         if (entry == null) {
           break;
         }
-        // update the lease manager
-        INodeFile file = dir.getInode(entry.getInodeId()).asFile();
-        FileUnderConstructionFeature uc = file.getFileUnderConstructionFeature();
-        Preconditions.checkState(uc != null); // file must be under-construction
-        fsn.leaseManager.addLease(uc.getClientName(),
-                entry.getInodeId());
       }
     }
 
@@ -332,15 +329,23 @@ public final class FSImageFormatPBINode {
       assert n.getType() == INodeSection.INode.Type.FILE;
       INodeSection.INodeFile f = n.getFile();
       List<BlockProto> bp = f.getBlocksList();
-      short replication = (short) f.getReplication();
-      boolean isStriped = f.getIsStriped();
+      BlockType blockType = PBHelperClient.convert(f.getBlockType());
       LoaderContext state = parent.getLoaderContext();
-      ErasureCodingPolicy ecPolicy = ErasureCodingPolicyManager.getSystemDefaultPolicy();
+      boolean isStriped = f.hasErasureCodingPolicyID();
+      assert ((!isStriped) || (isStriped && !f.hasReplication()));
+      Short replication = (!isStriped ? (short) f.getReplication() : null);
+      ErasureCodingPolicy ecPolicy = isStriped ?
+          fsn.getErasureCodingPolicyManager().getByID(
+              (byte) f.getErasureCodingPolicyID()) : null;
+      Byte ecPolicyID = (isStriped ? ecPolicy.getId() : null);
 
       BlockInfo[] blocks = new BlockInfo[bp.size()];
       for (int i = 0; i < bp.size(); ++i) {
         BlockProto b = bp.get(i);
         if (isStriped) {
+          Preconditions.checkState(ecPolicy.getId() > 0,
+              "File with ID " + n.getId() +
+              " has an invalid erasure coding policy ID " + ecPolicy.getId());
           blocks[i] = new BlockInfoStriped(PBHelperClient.convert(b), ecPolicy);
         } else {
           blocks[i] = new BlockInfoContiguous(PBHelperClient.convert(b),
@@ -353,8 +358,8 @@ public final class FSImageFormatPBINode {
 
       final INodeFile file = new INodeFile(n.getId(),
           n.getName().toByteArray(), permissions, f.getModificationTime(),
-          f.getAccessTime(), blocks, replication, f.getPreferredBlockSize(),
-          (byte)f.getStoragePolicyID(), isStriped);
+          f.getAccessTime(), blocks, replication, ecPolicyID,
+          f.getPreferredBlockSize(), (byte)f.getStoragePolicyID(), blockType);
 
       if (f.hasAcl()) {
         int[] entries = AclEntryStatusFormat.toInt(loadAclEntries(
@@ -371,6 +376,8 @@ public final class FSImageFormatPBINode {
       if (f.hasFileUC()) {
         INodeSection.FileUnderConstructionFeature uc = f.getFileUC();
         file.toUnderConstruction(uc.getClientName(), uc.getClientMachine());
+        // update the lease manager
+        fsn.leaseManager.addLease(uc.getClientName(), file.getId());
         if (blocks.length > 0) {
           BlockInfo lastBlk = file.getLastBlock();
           // replace the last block of file
@@ -502,9 +509,14 @@ public final class FSImageFormatPBINode {
           .setModificationTime(file.getModificationTime())
           .setPermission(buildPermissionStatus(file, state.getStringMap()))
           .setPreferredBlockSize(file.getPreferredBlockSize())
-          .setReplication(file.getFileReplication())
           .setStoragePolicyID(file.getLocalStoragePolicyID())
-          .setIsStriped(file.isStriped());
+          .setBlockType(PBHelperClient.convert(file.getBlockType()));
+
+      if (file.isStriped()) {
+        b.setErasureCodingPolicyID(file.getErasureCodingPolicyID());
+      } else {
+        b.setReplication(file.getFileReplication());
+      }
 
       AclFeature f = file.getAclFeature();
       if (f != null) {

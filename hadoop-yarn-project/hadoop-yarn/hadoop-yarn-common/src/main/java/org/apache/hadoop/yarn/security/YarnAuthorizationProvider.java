@@ -28,6 +28,7 @@ import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.util.List;
 
 /**
@@ -54,10 +55,24 @@ public abstract class YarnAuthorizationProvider {
             (YarnAuthorizationProvider) ReflectionUtils.newInstance(
               authorizerClass, conf);
         authorizer.init(conf);
-        LOG.info(authorizerClass.getName() + " is instiantiated.");
+        LOG.info(authorizerClass.getName() + " is instantiated.");
       }
     }
     return authorizer;
+  }
+
+  /**
+   * Destroy the {@link YarnAuthorizationProvider} instance.
+   * This method is called only in Tests.
+   */
+  @VisibleForTesting
+  public static void destroy() {
+    synchronized (YarnAuthorizationProvider.class) {
+      if (authorizer != null) {
+        LOG.debug(authorizer.getClass().getName() + " is destroyed.");
+        authorizer = null;
+      }
+    }
   }
 
   /**

@@ -27,6 +27,8 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -40,8 +42,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FileContext;
@@ -56,6 +56,7 @@ import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ConfigurationException;
 import org.apache.hadoop.yarn.server.nodemanager.ContainerExecutor.Signal;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.ContainerLocalizer;
@@ -136,8 +137,8 @@ import org.junit.Test;
  * </ol>
  */
 public class TestLinuxContainerExecutor {
-  private static final Log LOG = LogFactory
-    .getLog(TestLinuxContainerExecutor.class);
+  private static final Logger LOG =
+       LoggerFactory.getLogger(TestLinuxContainerExecutor.class);
 
   private static File workSpace;
   static {
@@ -305,11 +306,13 @@ public class TestLinuxContainerExecutor {
     return cId;
   }
 
-  private int runAndBlock(String... cmd) throws IOException {
+  private int runAndBlock(String... cmd)
+      throws IOException, ConfigurationException {
     return runAndBlock(getNextContainerId(), cmd);
   }
 
-  private int runAndBlock(ContainerId cId, String... cmd) throws IOException {
+  private int runAndBlock(ContainerId cId, String... cmd)
+      throws IOException, ConfigurationException {
     String appId = "APP_" + getNextId();
     Container container = mock(Container.class);
     ContainerLaunchContext context = mock(ContainerLaunchContext.class);
@@ -448,7 +451,7 @@ public class TestLinuxContainerExecutor {
       public void run() {
         try {
           runAndBlock(sleepId, "sleep", "100");
-        } catch (IOException e) {
+        } catch (IOException|ConfigurationException e) {
           LOG.warn("Caught exception while running sleep", e);
         }
       };

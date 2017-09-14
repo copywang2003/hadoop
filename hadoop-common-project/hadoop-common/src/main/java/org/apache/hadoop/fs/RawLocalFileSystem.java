@@ -64,8 +64,6 @@ public class RawLocalFileSystem extends FileSystem {
   // Temporary workaround for HADOOP-9652.
   private static boolean useDeprecatedFileStatus = true;
 
-  private FsPermission umask;
-
   @VisibleForTesting
   public static void useStatIfAvailable() {
     useDeprecatedFileStatus = !Stat.isAvailable();
@@ -99,7 +97,6 @@ public class RawLocalFileSystem extends FileSystem {
   public void initialize(URI uri, Configuration conf) throws IOException {
     super.initialize(uri, conf);
     setConf(conf);
-    umask = FsPermission.getUMask(conf);
   }
   
   /*******************************************************
@@ -211,9 +208,7 @@ public class RawLocalFileSystem extends FileSystem {
   
   @Override
   public FSDataInputStream open(Path f, int bufferSize) throws IOException {
-    if (!exists(f)) {
-      throw new FileNotFoundException(f.toString());
-    }
+    getFileStatus(f);
     return new FSDataInputStream(new BufferedFSInputStream(
         new LocalFSFileInputStream(f), bufferSize));
   }
@@ -233,7 +228,7 @@ public class RawLocalFileSystem extends FileSystem {
       if (permission == null) {
         this.fos = new FileOutputStream(file, append);
       } else {
-        permission = permission.applyUMask(umask);
+        permission = permission.applyUMask(FsPermission.getUMask(getConf()));
         if (Shell.WINDOWS && NativeIO.isAvailable()) {
           this.fos = NativeIO.Windows.createFileOutputStreamWithMode(file,
               append, permission.toShort());
@@ -281,9 +276,6 @@ public class RawLocalFileSystem extends FileSystem {
   @Override
   public FSDataOutputStream append(Path f, int bufferSize,
       Progressable progress) throws IOException {
-    if (!exists(f)) {
-      throw new FileNotFoundException("File " + f + " not found");
-    }
     FileStatus status = getFileStatus(f);
     if (status.isDirectory()) {
       throw new IOException("Cannot append to a diretory (=" + f + " )");
@@ -390,17 +382,21 @@ public class RawLocalFileSystem extends FileSystem {
     // platforms (notably Windows) do not provide this behavior, so the Java API
     // call renameTo(dstFile) fails. Delete destination and attempt rename
     // again.
-    if (this.exists(dst)) {
+    try {
       FileStatus sdst = this.getFileStatus(dst);
-      if (sdst.isDirectory() && dstFile.list().length == 0) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Deleting empty destination and renaming " + src + " to " +
-            dst);
-        }
-        if (this.delete(dst, false) && srcFile.renameTo(dstFile)) {
-          return true;
+      String[] dstFileList = dstFile.list();
+      if (dstFileList != null) {
+        if (sdst.isDirectory() && dstFileList.length == 0) {
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Deleting empty destination and renaming " + src +
+                " to " + dst);
+          }
+          if (this.delete(dst, false) && srcFile.renameTo(dstFile)) {
+            return true;
+          }
         }
       }
+    } catch (FileNotFoundException ignored) {
     }
     return false;
   }
@@ -469,10 +465,7 @@ public class RawLocalFileSystem extends FileSystem {
     }
 
     if (localf.isDirectory()) {
-      String[] names = localf.list();
-      if (names == null) {
-        return null;
-      }
+      String[] names = FileUtil.list(localf);
       results = new FileStatus[names.length];
       int j = 0;
       for (int i = 0; i < names.length; i++) {
@@ -510,7 +503,7 @@ public class RawLocalFileSystem extends FileSystem {
     if (permission == null) {
       permission = FsPermission.getDirDefault();
     }
-    permission = permission.applyUMask(umask);
+    permission = permission.applyUMask(FsPermission.getUMask(getConf()));
     if (Shell.WINDOWS && NativeIO.isAvailable()) {
       try {
         NativeIO.Windows.createDirectoryWithMode(p2f, permission.toShort());
@@ -562,7 +555,7 @@ public class RawLocalFileSystem extends FileSystem {
       }
     }
     if (p2f.exists() && !p2f.isDirectory()) {
-      throw new FileNotFoundException("Destination exists" +
+      throw new FileAlreadyExistsException("Destination exists" +
               " and is not a directory: " + p2f.getCanonicalPath());
     }
     return (parent == null || parent2f.exists() || mkdirs(parent)) &&

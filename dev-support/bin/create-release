@@ -50,6 +50,7 @@ function hadoop_abs
   declare obj=$1
   declare dir
   declare fn
+  declare ret
 
   if [[ ! -e ${obj} ]]; then
     return 1
@@ -62,7 +63,8 @@ function hadoop_abs
   fi
 
   dir=$(cd -P -- "${dir}" >/dev/null 2>/dev/null && pwd -P)
-  if [[ $? = 0 ]]; then
+  ret=$?
+  if [[ ${ret} = 0 ]]; then
     echo "${dir}${fn}"
     return 0
   fi
@@ -249,7 +251,7 @@ function startgpgagent
   if [[ "${SIGN}" = true ]]; then
     if [[ -n "${GPGAGENT}" && -z "${GPG_AGENT_INFO}" ]]; then
       echo "starting gpg agent"
-      echo "default-cache-ttl 7200" > "${LOGDIR}/gpgagent.conf"
+      echo "default-cache-ttl 14400" > "${LOGDIR}/gpgagent.conf"
       # shellcheck disable=2046
       eval $("${GPGAGENT}" --daemon \
         --options "${LOGDIR}/gpgagent.conf" \
@@ -287,6 +289,7 @@ function usage
   echo "--mvncache=[path]       Path to the maven cache to use"
   echo "--native                Also build the native components"
   echo "--rc-label=[label]      Add this label to the builds"
+  echo "--security              Emergency security release"
   echo "--sign                  Use .gnupg dir to sign the artifacts and jars"
   echo "--version=[version]     Use an alternative version string"
 }
@@ -329,6 +332,9 @@ function option_parse
       ;;
       --rc-label=*)
         RC_LABEL=${i#*=}
+      ;;
+      --security)
+        SECURITYRELEASE=true
       ;;
       --sign)
         SIGN=true
@@ -395,6 +401,14 @@ function option_parse
     mkdir -p "${MVNCACHE}"
     if [[ -d "${MVNCACHE}" ]]; then
       MVN_ARGS=("-Dmaven.repo.local=${MVNCACHE}")
+    fi
+  fi
+
+  if [[ "${SECURITYRELEASE}" = true ]]; then
+    if [[ ! -d "${BASEDIR}/hadoop-common-project/hadoop-common/src/site/markdown/release/${HADOOP_VERSION}" ]]; then
+      hadoop_error "ERROR: ${BASEDIR}/hadoop-common-project/hadoop-common/src/site/markdown/release/${HADOOP_VERSION} does not exist."
+      hadoop_error "ERROR: This directory and its contents are required to be manually created for a security release."
+      exit 1
     fi
   fi
 }
@@ -506,6 +520,9 @@ function makearelease
 
   mkdir -p "${LOGDIR}"
 
+  # Install the Hadoop maven plugins first
+  run_and_redirect "${LOGDIR}/mvn_install_maven_plugins.log" "${MVN}" "${MVN_ARGS[@]}" -pl hadoop-maven-plugins -am clean install
+
   # mvn clean for sanity
   run_and_redirect "${LOGDIR}/mvn_clean.log" "${MVN}" "${MVN_ARGS[@]}" clean
 
@@ -520,16 +537,24 @@ function makearelease
   big_console_header "Maven Build and Install"
 
   if [[ "${SIGN}" = true ]]; then
-    signflags=("-Psign" "-Dgpg.useagent=true" -Dgpg.executable="${GPG}")
+    signflags=("-Psign" "-Dgpg.useagent=true" "-Dgpg.executable=${GPG}")
   fi
 
   # Create SRC and BIN tarballs for release,
   # shellcheck disable=SC2046
   run_and_redirect "${LOGDIR}/mvn_install.log" \
     "${MVN}" "${MVN_ARGS[@]}" install \
-      -Pdist,src \
+      -Pdist,src,yarn-ui \
       "${signflags[@]}" \
       -DskipTests -Dtar $(hadoop_native_flags)
+
+  if [[ "${SECURITYRELEASE}" = true ]]; then
+    DOCFLAGS="-Pdocs"
+    hadoop_error "WARNING: Skipping automatic changelog and release notes generation due to --security"
+  else
+    DOCFLAGS="-Preleasedocs,docs"
+  fi
+
 
   # Create site for release
   # we need to do install again so that jdiff and
@@ -539,7 +564,8 @@ function makearelease
     "${MVN}" "${MVN_ARGS[@]}" install \
       site site:stage \
       -DskipTests \
-      -Pdist,src,releasedocs,docs
+      -Pdist,src \
+      "${DOCFLAGS}"
 
   big_console_header "Staging the release"
 
@@ -583,6 +609,7 @@ function makearelease
 function signartifacts
 {
   declare i
+  declare ret
 
   if [[ "${SIGN}" = false ]]; then
     for i in ${ARTIFACTS_DIR}/*; do
@@ -609,7 +636,8 @@ function signartifacts
     ${GPG} --verify --trustdb "${BASEDIR}/target/testkeysdb" \
       "${ARTIFACTS_DIR}/hadoop-${HADOOP_VERSION}${RC_LABEL}.tar.gz.asc" \
         "${ARTIFACTS_DIR}/hadoop-${HADOOP_VERSION}${RC_LABEL}.tar.gz"
-    if [[ $? != 0 ]]; then
+    ret=$?
+    if [[ ${ret} != 0 ]]; then
       hadoop_error "ERROR: GPG key is not present in ${PUBKEYFILE}."
       hadoop_error "ERROR: This MUST be fixed. Exiting."
       exit 1
@@ -638,6 +666,7 @@ if [[ "${INDOCKER}" = true || "${DOCKERRAN}" = false ]]; then
   startgpgagent
 
   makearelease
+  releaseret=$?
 
   signartifacts
 
@@ -648,7 +677,7 @@ if [[ "${INDOCKER}" = true ]]; then
   exit $?
 fi
 
-if [[ $? == 0 ]]; then
+if [[ ${releaseret} == 0 ]]; then
   echo
   echo "Congratulations, you have successfully built the release"
   echo "artifacts for Apache Hadoop ${HADOOP_VERSION}${RC_LABEL}"

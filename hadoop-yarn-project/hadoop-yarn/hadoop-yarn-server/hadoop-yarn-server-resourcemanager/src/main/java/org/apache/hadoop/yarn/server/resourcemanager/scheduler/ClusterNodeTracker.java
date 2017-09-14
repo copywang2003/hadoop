@@ -18,11 +18,13 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler;
 
+import com.google.common.base.Preconditions;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.util.resource.Resources;
 
@@ -50,14 +52,15 @@ public class ClusterNodeTracker<N extends SchedulerNode> {
   private Lock writeLock = readWriteLock.writeLock();
 
   private HashMap<NodeId, N> nodes = new HashMap<>();
-  private Map<String, Integer> nodesPerRack = new HashMap<>();
+  private Map<String, N> nodeNameToNodeMap = new HashMap<>();
+  private Map<String, List<N>> nodesPerRack = new HashMap<>();
 
   private Resource clusterCapacity = Resources.clone(Resources.none());
   private Resource staleClusterCapacity = null;
 
   // Max allocation
   private long maxNodeMemory = -1;
-  private long maxNodeVCores = -1;
+  private int maxNodeVCores = -1;
   private Resource configuredMaxAllocation;
   private boolean forceConfiguredMaxAllocation = true;
   private long configuredMaxAllocationWaitTime;
@@ -66,14 +69,16 @@ public class ClusterNodeTracker<N extends SchedulerNode> {
     writeLock.lock();
     try {
       nodes.put(node.getNodeID(), node);
+      nodeNameToNodeMap.put(node.getNodeName(), node);
 
       // Update nodes per rack as well
       String rackName = node.getRackName();
-      Integer numNodes = nodesPerRack.get(rackName);
-      if (numNodes == null) {
-        numNodes = 0;
+      List<N> nodesList = nodesPerRack.get(rackName);
+      if (nodesList == null) {
+        nodesList = new ArrayList<>();
+        nodesPerRack.put(rackName, nodesList);
       }
-      nodesPerRack.put(rackName, ++numNodes);
+      nodesList.add(node);
 
       // Update cluster capacity
       Resources.addTo(clusterCapacity, node.getTotalResource());
@@ -126,8 +131,8 @@ public class ClusterNodeTracker<N extends SchedulerNode> {
     readLock.lock();
     String rName = rackName == null ? "NULL" : rackName;
     try {
-      Integer nodeCount = nodesPerRack.get(rName);
-      return nodeCount == null ? 0 : nodeCount;
+      List<N> nodesList = nodesPerRack.get(rName);
+      return nodesList == null ? 0 : nodesList.size();
     } finally {
       readLock.unlock();
     }
@@ -154,14 +159,18 @@ public class ClusterNodeTracker<N extends SchedulerNode> {
         LOG.warn("Attempting to remove a non-existent node " + nodeId);
         return null;
       }
+      nodeNameToNodeMap.remove(node.getNodeName());
 
       // Update nodes per rack as well
       String rackName = node.getRackName();
-      Integer numNodes = nodesPerRack.get(rackName);
-      if (numNodes > 0) {
-        nodesPerRack.put(rackName, --numNodes);
-      } else {
+      List<N> nodesList = nodesPerRack.get(rackName);
+      if (nodesList == null) {
         LOG.error("Attempting to remove node from an empty rack " + rackName);
+      } else {
+        nodesList.remove(node);
+        if (nodesList.isEmpty()) {
+          nodesPerRack.remove(rackName);
+        }
       }
 
       // Update cluster capacity
@@ -210,10 +219,15 @@ public class ClusterNodeTracker<N extends SchedulerNode> {
         return configuredMaxAllocation;
       }
 
-      return Resources.createResource(
-          Math.min(configuredMaxAllocation.getMemorySize(), maxNodeMemory),
-          Math.min(configuredMaxAllocation.getVirtualCores(), maxNodeVCores)
-      );
+      Resource ret = Resources.clone(configuredMaxAllocation);
+      if (ret.getMemorySize() > maxNodeMemory) {
+        ret.setMemorySize(maxNodeMemory);
+      }
+      if (ret.getVirtualCores() > maxNodeVCores) {
+        ret.setVirtualCores(maxNodeVCores);
+      }
+
+      return ret;
     } finally {
       readLock.unlock();
     }
@@ -259,6 +273,9 @@ public class ClusterNodeTracker<N extends SchedulerNode> {
 
   /**
    * Convenience method to filter nodes based on a condition.
+   *
+   * @param nodeFilter A {@link NodeFilter} for filtering the nodes
+   * @return A list of filtered nodes
    */
   public List<N> getNodes(NodeFilter nodeFilter) {
     List<N> nodeList = new ArrayList<>();
@@ -270,6 +287,37 @@ public class ClusterNodeTracker<N extends SchedulerNode> {
         for (N node : nodes.values()) {
           if (nodeFilter.accept(node)) {
             nodeList.add(node);
+          }
+        }
+      }
+    } finally {
+      readLock.unlock();
+    }
+    return nodeList;
+  }
+
+  public List<NodeId> getAllNodeIds() {
+    return getNodeIds(null);
+  }
+
+  /**
+   * Convenience method to filter nodes based on a condition.
+   *
+   * @param nodeFilter A {@link NodeFilter} for filtering the nodes
+   * @return A list of filtered nodes
+   */
+  public List<NodeId> getNodeIds(NodeFilter nodeFilter) {
+    List<NodeId> nodeList = new ArrayList<>();
+    readLock.lock();
+    try {
+      if (nodeFilter == null) {
+        for (N node : nodes.values()) {
+          nodeList.add(node.getNodeID());
+        }
+      } else {
+        for (N node : nodes.values()) {
+          if (nodeFilter.accept(node)) {
+            nodeList.add(node.getNodeID());
           }
         }
       }
@@ -296,5 +344,57 @@ public class ClusterNodeTracker<N extends SchedulerNode> {
     }
     Collections.sort(sortedList, comparator);
     return sortedList;
+  }
+
+  /**
+   * Convenience method to return list of nodes corresponding to resourceName
+   * passed in the {@link ResourceRequest}.
+   *
+   * @param resourceName Host/rack name of the resource, or
+   * {@link ResourceRequest#ANY}
+   * @return list of nodes that match the resourceName
+   */
+  public List<N> getNodesByResourceName(final String resourceName) {
+    Preconditions.checkArgument(
+        resourceName != null && !resourceName.isEmpty());
+    List<N> retNodes = new ArrayList<>();
+    if (ResourceRequest.ANY.equals(resourceName)) {
+      retNodes.addAll(getAllNodes());
+    } else if (nodeNameToNodeMap.containsKey(resourceName)) {
+      retNodes.add(nodeNameToNodeMap.get(resourceName));
+    } else if (nodesPerRack.containsKey(resourceName)) {
+      retNodes.addAll(nodesPerRack.get(resourceName));
+    } else {
+      LOG.info(
+          "Could not find a node matching given resourceName " + resourceName);
+    }
+    return retNodes;
+  }
+
+  /**
+   * Convenience method to return list of {@link NodeId} corresponding to
+   * resourceName passed in the {@link ResourceRequest}.
+   *
+   * @param resourceName Host/rack name of the resource, or
+   * {@link ResourceRequest#ANY}
+   * @return list of {@link NodeId} that match the resourceName
+   */
+  public List<NodeId> getNodeIdsByResourceName(final String resourceName) {
+    Preconditions.checkArgument(
+        resourceName != null && !resourceName.isEmpty());
+    List<NodeId> retNodes = new ArrayList<>();
+    if (ResourceRequest.ANY.equals(resourceName)) {
+      retNodes.addAll(getAllNodeIds());
+    } else if (nodeNameToNodeMap.containsKey(resourceName)) {
+      retNodes.add(nodeNameToNodeMap.get(resourceName).getNodeID());
+    } else if (nodesPerRack.containsKey(resourceName)) {
+      for (N node : nodesPerRack.get(resourceName)) {
+        retNodes.add(node.getNodeID());
+      }
+    } else {
+      LOG.info(
+          "Could not find a node matching given resourceName " + resourceName);
+    }
+    return retNodes;
   }
 }

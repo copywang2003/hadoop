@@ -27,6 +27,7 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.security.token.block.BlockTokenIdentifier;
@@ -36,11 +37,15 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicy;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
+import org.apache.hadoop.io.erasurecode.CodecUtil;
+import org.apache.hadoop.io.erasurecode.ErasureCodeNative;
+import org.apache.hadoop.io.erasurecode.rawcoder.NativeRSRawErasureCoderFactory;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.log4j.Level;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
@@ -55,8 +60,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 
-
+/**
+ * Test striped file write operation with data node failures.
+ */
 public class TestDFSStripedOutputStreamWithFailure {
   public static final Log LOG = LogFactory.getLog(
       TestDFSStripedOutputStreamWithFailure.class);
@@ -68,53 +76,62 @@ public class TestDFSStripedOutputStreamWithFailure {
         .getLogger().setLevel(Level.ALL);
   }
 
-  private static final int NUM_DATA_BLOCKS = StripedFileTestUtil.NUM_DATA_BLOCKS;
-  private static final int NUM_PARITY_BLOCKS = StripedFileTestUtil.NUM_PARITY_BLOCKS;
-  private static final int CELL_SIZE = StripedFileTestUtil.BLOCK_STRIPED_CELL_SIZE;
-  private static final int STRIPES_PER_BLOCK = 4;
-  private static final int BLOCK_SIZE = CELL_SIZE * STRIPES_PER_BLOCK;
-  private static final int BLOCK_GROUP_SIZE = BLOCK_SIZE * NUM_DATA_BLOCKS;
+  private ErasureCodingPolicy ecPolicy;
+  private int dataBlocks;
+  private int parityBlocks;
+  private int cellSize;
+  private final int stripesPerBlock = 4;
+  private int blockSize;
+  private int blockGroupSize;
 
   private static final int FLUSH_POS =
       9 * DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_DEFAULT + 1;
 
-  static {
-    System.out.println("NUM_DATA_BLOCKS  = " + NUM_DATA_BLOCKS);
-    System.out.println("NUM_PARITY_BLOCKS= " + NUM_PARITY_BLOCKS);
-    System.out.println("CELL_SIZE        = " + CELL_SIZE
-        + " (=" + StringUtils.TraditionalBinaryPrefix.long2String(CELL_SIZE, "B", 2) + ")");
-    System.out.println("BLOCK_SIZE       = " + BLOCK_SIZE
-        + " (=" + StringUtils.TraditionalBinaryPrefix.long2String(BLOCK_SIZE, "B", 2) + ")");
-    System.out.println("BLOCK_GROUP_SIZE = " + BLOCK_GROUP_SIZE
-        + " (=" + StringUtils.TraditionalBinaryPrefix.long2String(BLOCK_GROUP_SIZE, "B", 2) + ")");
+  public ErasureCodingPolicy getEcPolicy() {
+    return StripedFileTestUtil.getDefaultECPolicy();
   }
 
-  static List<Integer> newLengths() {
-    final List<Integer> lengths = new ArrayList<>();
-    lengths.add(FLUSH_POS + 2);
+  /*
+   * Initialize erasure coding policy.
+   */
+  @Before
+  public void init(){
+    ecPolicy = getEcPolicy();
+    dataBlocks = ecPolicy.getNumDataUnits();
+    parityBlocks = ecPolicy.getNumParityUnits();
+    cellSize = ecPolicy.getCellSize();
+    blockSize = cellSize * stripesPerBlock;
+    blockGroupSize = blockSize * dataBlocks;
+    dnIndexSuite = getDnIndexSuite();
+    lengths = newLengths();
+  }
+
+  List<Integer> newLengths() {
+    final List<Integer> lens = new ArrayList<>();
+    lens.add(FLUSH_POS + 2);
     for(int b = 0; b <= 2; b++) {
-      for(int c = 0; c < STRIPES_PER_BLOCK*NUM_DATA_BLOCKS; c++) {
+      for(int c = 0; c < stripesPerBlock * dataBlocks; c++) {
         for(int delta = -1; delta <= 1; delta++) {
-          final int length = b*BLOCK_GROUP_SIZE + c*CELL_SIZE + delta;
-          System.out.println(lengths.size() + ": length=" + length
+          final int length = b * blockGroupSize + c * cellSize + delta;
+          System.out.println(lens.size() + ": length=" + length
               + ", (b, c, d) = (" + b + ", " + c + ", " + delta + ")");
-          lengths.add(length);
+          lens.add(length);
         }
       }
     }
-    return lengths;
+    return lens;
   }
 
-  private static final int[][] dnIndexSuite = getDnIndexSuite();
+  private int[][] dnIndexSuite;
 
-  private static int[][] getDnIndexSuite() {
+  private int[][] getDnIndexSuite() {
     final int maxNumLevel = 2;
     final int maxPerLevel = 8;
     List<List<Integer>> allLists = new ArrayList<>();
-    int numIndex = NUM_PARITY_BLOCKS;
+    int numIndex = parityBlocks;
     for (int i = 0; i < maxNumLevel && numIndex > 1; i++) {
       List<List<Integer>> lists =
-          combinations(NUM_DATA_BLOCKS + NUM_PARITY_BLOCKS, numIndex);
+          combinations(dataBlocks + parityBlocks, numIndex);
       if (lists.size() > maxPerLevel) {
         Collections.shuffle(lists);
         lists = lists.subList(0, maxPerLevel);
@@ -122,15 +139,15 @@ public class TestDFSStripedOutputStreamWithFailure {
       allLists.addAll(lists);
       numIndex--;
     }
-    int[][] dnIndexSuite = new int[allLists.size()][];
-    for (int i = 0; i < dnIndexSuite.length; i++) {
+    int[][] dnIndexArray = new int[allLists.size()][];
+    for (int i = 0; i < dnIndexArray.length; i++) {
       int[] list = new int[allLists.get(i).size()];
       for (int j = 0; j < list.length; j++) {
         list[j] = allLists.get(i).get(j);
       }
-      dnIndexSuite[i] = list;
+      dnIndexArray[i] = list;
     }
-    return dnIndexSuite;
+    return dnIndexArray;
   }
 
   // get all combinations of k integers from {0,...,n-1}
@@ -168,10 +185,10 @@ public class TestDFSStripedOutputStreamWithFailure {
     return positions;
   }
 
-  private static final List<Integer> LENGTHS = newLengths();
+  private List<Integer> lengths;
 
-  static Integer getLength(int i) {
-    return i >= 0 && i < LENGTHS.size()? LENGTHS.get(i): null;
+  Integer getLength(int i) {
+    return i >= 0 && i < lengths.size()? lengths.get(i): null;
   }
 
   private static final Random RANDOM = new Random();
@@ -182,12 +199,29 @@ public class TestDFSStripedOutputStreamWithFailure {
       + TestDFSStripedOutputStreamWithFailure.class.getSimpleName());
 
   private void setup(Configuration conf) throws IOException {
-    final int numDNs = NUM_DATA_BLOCKS + NUM_PARITY_BLOCKS;
+    System.out.println("NUM_DATA_BLOCKS  = " + dataBlocks);
+    System.out.println("NUM_PARITY_BLOCKS= " + parityBlocks);
+    System.out.println("CELL_SIZE        = " + cellSize + " (=" +
+        StringUtils.TraditionalBinaryPrefix.long2String(cellSize, "B", 2)
+        + ")");
+    System.out.println("BLOCK_SIZE       = " + blockSize + " (=" +
+        StringUtils.TraditionalBinaryPrefix.long2String(blockSize, "B", 2)
+        + ")");
+    System.out.println("BLOCK_GROUP_SIZE = " + blockGroupSize + " (=" +
+        StringUtils.TraditionalBinaryPrefix.long2String(blockGroupSize, "B", 2)
+        + ")");
+    final int numDNs = dataBlocks + parityBlocks;
+    if (ErasureCodeNative.isNativeCodeLoaded()) {
+      conf.set(
+          CodecUtil.IO_ERASURECODE_CODEC_RS_RAWCODERS_KEY,
+          NativeRSRawErasureCoderFactory.CODER_NAME);
+    }
     cluster = new MiniDFSCluster.Builder(conf).numDataNodes(numDNs).build();
     cluster.waitActive();
     dfs = cluster.getFileSystem();
+    DFSTestUtil.enableAllECPolicies(dfs);
     dfs.mkdirs(dir);
-    dfs.setErasureCodingPolicy(dir, null);
+    dfs.setErasureCodingPolicy(dir, ecPolicy.getName());
   }
 
   private void tearDown() {
@@ -198,8 +232,8 @@ public class TestDFSStripedOutputStreamWithFailure {
 
   private HdfsConfiguration newHdfsConfiguration() {
     final HdfsConfiguration conf = new HdfsConfiguration();
-    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
-    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_REPLICATION_CONSIDERLOAD_KEY,
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
+    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_CONSIDERLOAD_KEY,
         false);
     conf.setInt(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_MAX_STREAMS_KEY, 0);
@@ -212,12 +246,12 @@ public class TestDFSStripedOutputStreamWithFailure {
   }
 
   /**
-   * Randomly pick a length and run tests with multiple data failures
+   * Randomly pick a length and run tests with multiple data failures.
    * TODO: enable this later
    */
   //@Test(timeout=240000)
   public void testMultipleDatanodeFailureRandomLength() throws Exception {
-    int lenIndex = RANDOM.nextInt(LENGTHS.size());
+    int lenIndex = RANDOM.nextInt(lengths.size());
     LOG.info("run testMultipleDatanodeFailureRandomLength with length index: "
         + lenIndex);
     runTestWithMultipleFailure(getLength(lenIndex));
@@ -225,14 +259,17 @@ public class TestDFSStripedOutputStreamWithFailure {
 
   @Test(timeout=240000)
   public void testBlockTokenExpired() throws Exception {
-    final int length = NUM_DATA_BLOCKS * (BLOCK_SIZE - CELL_SIZE);
+    // TODO: this is very flaky, re-enable it later. See HDFS-12417.
+    assumeTrue("Test has been temporarily disabled. See HDFS-12417.", false);
+    final int length = dataBlocks * (blockSize - cellSize);
     final HdfsConfiguration conf = newHdfsConfiguration();
 
     conf.setBoolean(DFSConfigKeys.DFS_BLOCK_ACCESS_TOKEN_ENABLE_KEY, true);
-    conf.setInt(CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY, 0);
+    conf.setInt(
+        CommonConfigurationKeysPublic.IPC_CLIENT_CONNECT_MAX_RETRIES_KEY, 0);
     // Set short retry timeouts so this test runs faster
     conf.setInt(HdfsClientConfigKeys.Retry.WINDOW_BASE_KEY, 10);
-    for (int dn = 0; dn < NUM_DATA_BLOCKS + NUM_PARITY_BLOCKS; dn += 2) {
+    for (int dn = 0; dn < dataBlocks + parityBlocks; dn += 2) {
       try {
         setup(conf);
         runTest(length, new int[]{length / 2}, new int[]{dn}, true);
@@ -249,20 +286,21 @@ public class TestDFSStripedOutputStreamWithFailure {
   public void testAddBlockWhenNoSufficientDataBlockNumOfNodes()
       throws IOException {
     HdfsConfiguration conf = new HdfsConfiguration();
-    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
     try {
       setup(conf);
       ArrayList<DataNode> dataNodes = cluster.getDataNodes();
       // shutdown few datanodes to avoid getting sufficient data blocks number
       // of datanodes
       int numDatanodes = dataNodes.size();
-      while (numDatanodes >= NUM_DATA_BLOCKS) {
+      while (numDatanodes >= dataBlocks) {
         cluster.stopDataNode(0);
         numDatanodes--;
       }
       cluster.restartNameNodes();
       cluster.triggerHeartbeats();
-      DatanodeInfo[] info = dfs.getClient().datanodeReport(DatanodeReportType.LIVE);
+      DatanodeInfo[] info = dfs.getClient().datanodeReport(
+          DatanodeReportType.LIVE);
       assertEquals("Mismatches number of live Dns ", numDatanodes, info.length);
       final Path dirFile = new Path(dir, "ecfile");
       FSDataOutputStream out;
@@ -275,8 +313,8 @@ public class TestDFSStripedOutputStreamWithFailure {
       } catch (IOException ioe) {
         // expected
         GenericTestUtils.assertExceptionContains("Failed to get " +
-            NUM_DATA_BLOCKS + " nodes from namenode: blockGroupSize= " +
-            (NUM_DATA_BLOCKS + NUM_PARITY_BLOCKS) + ", blocks.length= " +
+            dataBlocks + " nodes from namenode: blockGroupSize= " +
+            (dataBlocks + parityBlocks) + ", blocks.length= " +
             numDatanodes, ioe);
       }
     } finally {
@@ -285,14 +323,15 @@ public class TestDFSStripedOutputStreamWithFailure {
   }
 
   @Test(timeout = 90000)
-  public void testAddBlockWhenNoSufficientParityNumOfNodes() throws IOException {
+  public void testAddBlockWhenNoSufficientParityNumOfNodes()
+      throws IOException {
     HdfsConfiguration conf = new HdfsConfiguration();
-    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, BLOCK_SIZE);
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
     try {
       setup(conf);
       ArrayList<DataNode> dataNodes = cluster.getDataNodes();
       // shutdown few data nodes to avoid writing parity blocks
-      int killDns = (NUM_PARITY_BLOCKS - 1);
+      int killDns = (parityBlocks - 1);
       int numDatanodes = dataNodes.size() - killDns;
       for (int i = 0; i < killDns; i++) {
         cluster.stopDataNode(i);
@@ -303,11 +342,12 @@ public class TestDFSStripedOutputStreamWithFailure {
           DatanodeReportType.LIVE);
       assertEquals("Mismatches number of live Dns ", numDatanodes, info.length);
       Path srcPath = new Path(dir, "testAddBlockWhenNoSufficientParityNodes");
-      int fileLength = StripedFileTestUtil.BLOCK_STRIPED_CELL_SIZE - 1000;
+      int fileLength = cellSize - 1000;
       final byte[] expected = StripedFileTestUtil.generateBytes(fileLength);
       DFSTestUtil.writeFile(dfs, srcPath, new String(expected));
       LOG.info("writing finished. Seek and read the file to verify.");
-      StripedFileTestUtil.verifySeek(dfs, srcPath, fileLength);
+      StripedFileTestUtil.verifySeek(dfs, srcPath, fileLength, ecPolicy,
+          blockGroupSize);
     } finally {
       tearDown();
     }
@@ -315,7 +355,7 @@ public class TestDFSStripedOutputStreamWithFailure {
 
   void runTest(final int length) {
     final HdfsConfiguration conf = newHdfsConfiguration();
-    for (int dn = 0; dn < NUM_DATA_BLOCKS + NUM_PARITY_BLOCKS; dn++) {
+    for (int dn = 0; dn < dataBlocks + parityBlocks; dn++) {
       try {
         LOG.info("runTest: dn=" + dn + ", length=" + length);
         setup(conf);
@@ -337,7 +377,8 @@ public class TestDFSStripedOutputStreamWithFailure {
       int[] killPos = getKillPositions(length, dnIndex.length);
       try {
         LOG.info("runTestWithMultipleFailure: length==" + length + ", killPos="
-            + Arrays.toString(killPos) + ", dnIndex=" + Arrays.toString(dnIndex));
+            + Arrays.toString(killPos) + ", dnIndex="
+            + Arrays.toString(dnIndex));
         setup(conf);
         runTest(length, killPos, dnIndex, false);
       } catch (Throwable e) {
@@ -352,7 +393,80 @@ public class TestDFSStripedOutputStreamWithFailure {
   }
 
   /**
-   * runTest implementation
+   * When the two DataNodes with partial data blocks fail.
+   */
+  @Test
+  public void runTestWithDifferentLengths() throws Exception {
+    assumeTrue("Skip this test case in the subclasses. Once is enough.",
+        this.getClass().equals(TestDFSStripedOutputStreamWithFailure.class));
+
+    final HdfsConfiguration conf = newHdfsConfiguration();
+
+    final int[] fileLengths = {
+        // Full stripe then partial on cell boundary
+        cellSize * (dataBlocks * 2 - 2),
+        // Full stripe and a partial on non-cell boundary
+        (cellSize * dataBlocks) + 123,
+    };
+    try {
+      for (int length: fileLengths) {
+        // select the two DNs with partial block to kill
+        final int[] dnIndex = {dataBlocks - 2, dataBlocks - 1};
+        final int[] killPos = getKillPositions(length, dnIndex.length);
+        try {
+          LOG.info("runTestWithMultipleFailure2: length==" + length
+              + ", killPos=" + Arrays.toString(killPos)
+              + ", dnIndex=" + Arrays.toString(dnIndex));
+          setup(conf);
+          runTest(length, killPos, dnIndex, false);
+        } catch (Throwable e) {
+          final String err = "failed, killPos=" + Arrays.toString(killPos)
+              + ", dnIndex=" + Arrays.toString(dnIndex) + ", length=" + length;
+          LOG.error(err);
+          throw e;
+        }
+      }
+    } finally {
+      tearDown();
+    }
+  }
+
+  /**
+   * Test writing very short EC files with many failures.
+   */
+  @Test
+  public void runTestWithShortStripe() throws Exception {
+    assumeTrue("Skip this test case in the subclasses. Once is enough.",
+        this.getClass().equals(TestDFSStripedOutputStreamWithFailure.class));
+
+    final HdfsConfiguration conf = newHdfsConfiguration();
+    // Write a file with a 1 cell partial stripe
+    final int length = cellSize - 123;
+    // Kill all but one DN
+    final int[] dnIndex = new int[dataBlocks + parityBlocks - 1];
+    for (int i = 0; i < dnIndex.length; i++) {
+      dnIndex[i] = i;
+    }
+    final int[] killPos = getKillPositions(length, dnIndex.length);
+
+    try {
+      LOG.info("runTestWithShortStripe: length==" + length + ", killPos="
+          + Arrays.toString(killPos) + ", dnIndex="
+          + Arrays.toString(dnIndex));
+      setup(conf);
+      runTest(length, killPos, dnIndex, false);
+    } catch (Throwable e) {
+      final String err = "failed, killPos=" + Arrays.toString(killPos)
+          + ", dnIndex=" + Arrays.toString(dnIndex) + ", length=" + length;
+      LOG.error(err);
+      throw e;
+    } finally {
+      tearDown();
+    }
+  }
+
+  /**
+   * runTest implementation.
    * @param length file length
    * @param killPos killing positions in ascending order
    * @param dnIndex DN index to kill when meets killing positions
@@ -362,8 +476,9 @@ public class TestDFSStripedOutputStreamWithFailure {
   private void runTest(final int length, final int[] killPos,
       final int[] dnIndex, final boolean tokenExpire) throws Exception {
     if (killPos[0] <= FLUSH_POS) {
-      LOG.warn("killPos=" + Arrays.toString(killPos) + " <= FLUSH_POS=" + FLUSH_POS
-          + ", length=" + length + ", dnIndex=" + Arrays.toString(dnIndex));
+      LOG.warn("killPos=" + Arrays.toString(killPos) + " <= FLUSH_POS="
+          + FLUSH_POS + ", length=" + length + ", dnIndex="
+          + Arrays.toString(dnIndex));
       return; //skip test
     }
     Preconditions.checkArgument(length > killPos[0], "length=%s <= killPos=%s",
@@ -389,12 +504,13 @@ public class TestDFSStripedOutputStreamWithFailure {
     final DFSStripedOutputStream stripedOut
         = (DFSStripedOutputStream)out.getWrappedStream();
 
-    long firstGS = -1;  // first GS of this block group which never proceeds blockRecovery
+    // first GS of this block group which never proceeds blockRecovery
+    long firstGS = -1;
     long oldGS = -1; // the old GS before bumping
     List<Long> gsList = new ArrayList<>();
     final List<DatanodeInfo> killedDN = new ArrayList<>();
     int numKilled=0;
-    for(; pos.get() < length; ) {
+    for(; pos.get() < length;) {
       final int i = pos.getAndIncrement();
       if (numKilled < killPos.length &&  i == killPos[numKilled]) {
         assertTrue(firstGS != -1);
@@ -412,17 +528,18 @@ public class TestDFSStripedOutputStreamWithFailure {
           waitTokenExpires(out);
         }
 
-        killedDN.add(killDatanode(cluster, stripedOut, dnIndex[numKilled], pos));
+        killedDN.add(
+            killDatanode(cluster, stripedOut, dnIndex[numKilled], pos));
         numKilled++;
       }
 
       write(out, i);
 
-      if (i % BLOCK_GROUP_SIZE == FLUSH_POS) {
+      if (i % blockGroupSize == FLUSH_POS) {
         firstGS = getGenerationStamp(stripedOut);
         oldGS = firstGS;
       }
-      if (i > 0 && (i + 1) % BLOCK_GROUP_SIZE == 0) {
+      if (i > 0 && (i + 1) % blockGroupSize == 0) {
         gsList.add(oldGS);
       }
     }
@@ -433,7 +550,8 @@ public class TestDFSStripedOutputStreamWithFailure {
     StripedFileTestUtil.waitBlockGroupsReported(dfs, fullPath, numKilled);
 
     cluster.triggerBlockReports();
-    StripedFileTestUtil.checkData(dfs, p, length, killedDN, gsList);
+    StripedFileTestUtil.checkData(dfs, p, length, killedDN, gsList,
+        blockGroupSize);
   }
 
   static void write(FSDataOutputStream out, int i) throws IOException {
@@ -499,43 +617,87 @@ public class TestDFSStripedOutputStreamWithFailure {
     }
   }
 
-  public static abstract class TestBase {
-    static final long TIMEOUT = 240000;
-
-    int getBase() {
-      final String name = getClass().getSimpleName();
-      int i = name.length() - 1;
-      for(; i >= 0 && Character.isDigit(name.charAt(i)); i--);
-      return Integer.parseInt(name.substring(i + 1));
+  int getBase() {
+    final String name = getClass().getSimpleName();
+    int i = name.length() - 1;
+    for(; i >= 0 && Character.isDigit(name.charAt(i));){
+      i--;
     }
-
-    private final TestDFSStripedOutputStreamWithFailure test
-        = new TestDFSStripedOutputStreamWithFailure();
-    private void run(int offset) {
-      final int i = offset + getBase();
-      final Integer length = getLength(i);
-      if (length == null) {
-        System.out.println("Skip test " + i + " since length=null.");
-        return;
-      }
-      if (RANDOM.nextInt(16) != 0) {
-        System.out.println("Test " + i + ", length=" + length
-            + ", is not chosen to run.");
-        return;
-      }
-      System.out.println("Run test " + i + ", length=" + length);
-      test.runTest(length);
+    String number = name.substring(i + 1);
+    try {
+      return Integer.parseInt(number);
+    } catch (Exception e) {
+      return -1;
     }
+  }
 
-    @Test(timeout=TIMEOUT) public void test0() {run(0);}
-    @Test(timeout=TIMEOUT) public void test1() {run(1);}
-    @Test(timeout=TIMEOUT) public void test2() {run(2);}
-    @Test(timeout=TIMEOUT) public void test3() {run(3);}
-    @Test(timeout=TIMEOUT) public void test4() {run(4);}
-    @Test(timeout=TIMEOUT) public void test5() {run(5);}
-    @Test(timeout=TIMEOUT) public void test6() {run(6);}
-    @Test(timeout=TIMEOUT) public void test7() {run(7);}
-    @Test(timeout=TIMEOUT) public void test8() {run(8);}
-    @Test(timeout=TIMEOUT) public void test9() {run(9);}
+  private void run(int offset) {
+    int base = getBase();
+    // TODO: Fix and re-enable these flaky tests. See HDFS-12417.
+    assumeTrue("Test has been temporarily disabled. See HDFS-12417.", false);
+    assumeTrue(base >= 0);
+    final int i = offset + base;
+    final Integer length = getLength(i);
+    if (length == null) {
+      System.out.println("Skip test " + i + " since length=null.");
+      return;
+    }
+    if (RANDOM.nextInt(16) != 0) {
+      System.out.println("Test " + i + ", length=" + length
+          + ", is not chosen to run.");
+      return;
+    }
+    System.out.println("Run test " + i + ", length=" + length);
+    runTest(length);
+  }
+
+  @Test(timeout = 240000)
+  public void test0() {
+    run(0);
+  }
+
+  @Test(timeout = 240000)
+  public void test1() {
+    run(1);
+  }
+
+  @Test(timeout = 240000)
+  public void test2() {
+    run(2);
+  }
+
+  @Test(timeout = 240000)
+  public void test3() {
+    run(3);
+  }
+
+  @Test(timeout = 240000)
+  public void test4() {
+    run(4);
+  }
+
+  @Test(timeout = 240000)
+  public void test5() {
+    run(5);
+  }
+
+  @Test(timeout = 240000)
+  public void test6() {
+    run(6);
+  }
+
+  @Test(timeout = 240000)
+  public void test7() {
+    run(7);
+  }
+
+  @Test(timeout = 240000)
+  public void test8() {
+    run(8);
+  }
+
+  @Test(timeout = 240000)
+  public void test9() {
+    run(9);
   }
 }

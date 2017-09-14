@@ -20,19 +20,19 @@
 
 package org.apache.hadoop.yarn.server.nodemanager.containermanager.linux.resources;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
 public class TestResourceHandlerModule {
-  private static final Log LOG = LogFactory.
-      getLog(TestResourceHandlerModule.class);
+  private static final Logger LOG =
+       LoggerFactory.getLogger(TestResourceHandlerModule.class);
   Configuration emptyConf;
   Configuration networkEnabledConf;
 
@@ -43,9 +43,6 @@ public class TestResourceHandlerModule {
 
     networkEnabledConf.setBoolean(YarnConfiguration.NM_NETWORK_RESOURCE_ENABLED,
         true);
-    //We need to bypass mtab parsing for figuring out cgroups mount locations
-    networkEnabledConf.setBoolean(YarnConfiguration
-        .NM_LINUX_CONTAINER_CGROUPS_MOUNT, true);
     ResourceHandlerModule.nullifyResourceHandlerChain();
   }
 

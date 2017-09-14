@@ -37,8 +37,8 @@ import org.junit.Test;
  * client-side logging.
  *
  */
-public class TestNativeAzureFileSystemClientLogging extends
-    NativeAzureFileSystemBaseTest {
+public class TestNativeAzureFileSystemClientLogging
+    extends AbstractWasbTestBase {
 
   private AzureBlobStorageTestAccount testAccount;
 
@@ -105,7 +105,15 @@ public class TestNativeAzureFileSystemClientLogging extends
 
     performWASBOperations();
 
-    assertTrue(verifyStorageClientLogs(logs.getOutput(), TEMP_DIR));
+    String output = getLogOutput(logs);
+    assertTrue("Log entry " + TEMP_DIR + " not found  in " + output,
+        verifyStorageClientLogs(output, TEMP_DIR));
+  }
+
+  protected String getLogOutput(LogCapturer logs) {
+    String output = logs.getOutput();
+    assertTrue("No log created/captured", !output.isEmpty());
+    return output;
   }
 
   @Test
@@ -118,8 +126,10 @@ public class TestNativeAzureFileSystemClientLogging extends
     updateFileSystemConfiguration(false);
 
     performWASBOperations();
+    String output = getLogOutput(logs);
 
-    assertFalse(verifyStorageClientLogs(logs.getOutput(), TEMP_DIR));
+    assertFalse("Log entry " + TEMP_DIR + " found  in " + output,
+        verifyStorageClientLogs(output, TEMP_DIR));
   }
 
   @Override

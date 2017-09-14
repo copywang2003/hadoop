@@ -32,6 +32,7 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.logging.Log;
@@ -41,6 +42,9 @@ import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+import org.apache.hadoop.hdfs.server.datanode.StorageLocation;
+import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
+import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.io.nativeio.NativeIO;
 import org.apache.hadoop.io.nativeio.NativeIOException;
 import org.apache.hadoop.util.ToolRunner;
@@ -121,9 +125,10 @@ public abstract class Storage extends StorageInfo {
     public StorageDirType getStorageDirType();
     public boolean isOfType(StorageDirType type);
   }
-  
-  protected List<StorageDirectory> storageDirs = new ArrayList<StorageDirectory>();
-  
+
+  private final List<StorageDirectory> storageDirs =
+      new CopyOnWriteArrayList<>();
+
   private class DirIterator implements Iterator<StorageDirectory> {
     final StorageDirType dirType;
     final boolean includeShared;
@@ -269,11 +274,15 @@ public abstract class Storage extends StorageInfo {
 
     private String storageUuid = null;      // Storage directory identifier.
     
+    private final StorageLocation location;
     public StorageDirectory(File dir) {
-      // default dirType is null
       this(dir, null, false);
     }
     
+    public StorageDirectory(StorageLocation location) {
+      this(null, false, location);
+    }
+
     public StorageDirectory(File dir, StorageDirType dirType) {
       this(dir, dirType, false);
     }
@@ -294,12 +303,61 @@ public abstract class Storage extends StorageInfo {
      *          disables locking on the storage directory, false enables locking
      */
     public StorageDirectory(File dir, StorageDirType dirType, boolean isShared) {
+      this(dir, dirType, isShared, null);
+    }
+
+    /**
+     * Constructor
+     * @param dirType storage directory type
+     * @param isShared whether or not this dir is shared between two NNs. true
+     *          disables locking on the storage directory, false enables locking
+     * @param location the {@link StorageLocation} for this directory
+     */
+    public StorageDirectory(StorageDirType dirType, boolean isShared,
+        StorageLocation location) {
+      this(getStorageLocationFile(location), dirType, isShared, location);
+    }
+
+    /**
+     * Constructor
+     * @param bpid the block pool id
+     * @param dirType storage directory type
+     * @param isShared whether or not this dir is shared between two NNs. true
+     *          disables locking on the storage directory, false enables locking
+     * @param location the {@link StorageLocation} for this directory
+     */
+    public StorageDirectory(String bpid, StorageDirType dirType,
+        boolean isShared, StorageLocation location) {
+      this(new File(location.getBpURI(bpid, STORAGE_DIR_CURRENT)), dirType,
+          isShared, location);
+    }
+
+    private StorageDirectory(File dir, StorageDirType dirType,
+        boolean isShared, StorageLocation location) {
       this.root = dir;
       this.lock = null;
-      this.dirType = dirType;
+      // default dirType is UNDEFINED
+      this.dirType = (dirType == null ? NameNodeDirType.UNDEFINED : dirType);
       this.isShared = isShared;
+      this.location = location;
+      assert location == null || dir == null ||
+          dir.getAbsolutePath().startsWith(
+              new File(location.getUri()).getAbsolutePath()):
+            "The storage location and directory should be equal";
     }
-    
+
+    private static File getStorageLocationFile(StorageLocation location) {
+      if (location == null) {
+        return null;
+      }
+      try {
+        return new File(location.getUri());
+      } catch (IllegalArgumentException e) {
+        //if location does not refer to a File
+        return null;
+      }
+    }
+
     /**
      * Get root directory of this storage
      */
@@ -493,7 +551,7 @@ public abstract class Storage extends StorageInfo {
           Files.newDirectoryStream(currentDir.toPath())) {
         if (dirStream.iterator().hasNext()) {
           throw new InconsistentFSStateException(root,
-              "Can't format the storage directory because the current/ "
+              "Can't format the storage directory because the current "
                   + "directory is not empty.");
         }
       }
@@ -861,6 +919,10 @@ public abstract class Storage extends StorageInfo {
       }
       return false;
     }
+
+    public StorageLocation getStorageLocation() {
+      return location;
+    }
   }
 
   /**
@@ -877,7 +939,11 @@ public abstract class Storage extends StorageInfo {
   public int getNumStorageDirs() {
     return storageDirs.size();
   }
-  
+
+  public List<StorageDirectory> getStorageDirs() {
+    return storageDirs;
+  }
+
   public StorageDirectory getStorageDir(int idx) {
     return storageDirs.get(idx);
   }
@@ -908,6 +974,49 @@ public abstract class Storage extends StorageInfo {
       }
     }
     return false;
+  }
+
+  /**
+   * Returns true if the storage directory on the given directory is already
+   * loaded.
+   * @param location the {@link StorageLocation}
+   * @throws IOException if failed to get canonical path.
+   */
+  protected boolean containsStorageDir(StorageLocation location)
+      throws IOException {
+    for (StorageDirectory sd : storageDirs) {
+      if (location.matchesStorageDirectory(sd)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the storage directory on the given location is already
+   * loaded.
+   * @param location the {@link StorageLocation}
+   * @param bpid the block pool id
+   * @return true if the location matches to any existing storage directories
+   * @throws IOException IOException if failed to read location
+   * or storage directory path
+   */
+  protected boolean containsStorageDir(StorageLocation location, String bpid)
+      throws IOException {
+    for (StorageDirectory sd : storageDirs) {
+      if (location.matchesStorageDirectory(sd, bpid)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public NamespaceInfo getNamespaceInfo() {
+    return new NamespaceInfo(
+        getNamespaceID(),
+        getClusterID(),
+        null,
+        getCTime());
   }
 
   /**

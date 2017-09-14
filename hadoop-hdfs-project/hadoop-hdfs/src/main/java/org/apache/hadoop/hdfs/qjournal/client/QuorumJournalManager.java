@@ -41,6 +41,7 @@ import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.PrepareRe
 import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.SegmentStateProto;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
+import org.apache.hadoop.hdfs.server.common.Util;
 import org.apache.hadoop.hdfs.server.namenode.EditLogFileInputStream;
 import org.apache.hadoop.hdfs.server.namenode.EditLogInputStream;
 import org.apache.hadoop.hdfs.server.namenode.EditLogOutputStream;
@@ -50,8 +51,6 @@ import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLog;
 import org.apache.hadoop.hdfs.server.protocol.RemoteEditLogManifest;
 import org.apache.hadoop.hdfs.web.URLConnectionFactory;
-import org.apache.hadoop.net.NetUtils;
-import org.apache.hadoop.util.StringUtils;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
@@ -361,36 +360,16 @@ public class QuorumJournalManager implements JournalManager {
       URI uri, NamespaceInfo nsInfo, AsyncLogger.Factory factory)
           throws IOException {
     List<AsyncLogger> ret = Lists.newArrayList();
-    List<InetSocketAddress> addrs = getLoggerAddresses(uri);
+    List<InetSocketAddress> addrs = Util.getAddressesList(uri);
+    if (addrs.size() % 2 == 0) {
+      LOG.warn("Quorum journal URI '" + uri + "' has an even number " +
+          "of Journal Nodes specified. This is not recommended!");
+    }
     String jid = parseJournalId(uri);
     for (InetSocketAddress addr : addrs) {
       ret.add(factory.createLogger(conf, nsInfo, jid, addr));
     }
     return ret;
-  }
- 
-  private static List<InetSocketAddress> getLoggerAddresses(URI uri)
-      throws IOException {
-    String authority = uri.getAuthority();
-    Preconditions.checkArgument(authority != null && !authority.isEmpty(),
-        "URI has no authority: " + uri);
-    
-    String[] parts = StringUtils.split(authority, ';');
-    for (int i = 0; i < parts.length; i++) {
-      parts[i] = parts[i].trim();
-    }
-
-    if (parts.length % 2 == 0) {
-      LOG.warn("Quorum journal URI '" + uri + "' has an even number " +
-          "of Journal Nodes specified. This is not recommended!");
-    }
-    
-    List<InetSocketAddress> addrs = Lists.newArrayList();
-    for (String addr : parts) {
-      addrs.add(NetUtils.createSocketAddr(
-          addr, DFSConfigKeys.DFS_JOURNALNODE_RPC_PORT_DEFAULT));
-    }
-    return addrs;
   }
   
   @Override
@@ -402,8 +381,11 @@ public class QuorumJournalManager implements JournalManager {
         layoutVersion);
     loggers.waitForWriteQuorum(q, startSegmentTimeoutMs,
         "startLogSegment(" + txId + ")");
-    return new QuorumOutputStream(loggers, txId,
-        outputBufferCapacity, writeTxnsTimeoutMs);
+    boolean updateCommittedTxId = conf.getBoolean(
+        DFSConfigKeys.DFS_HA_TAILEDITS_INPROGRESS_KEY,
+        DFSConfigKeys.DFS_HA_TAILEDITS_INPROGRESS_DEFAULT);
+    return new QuorumOutputStream(loggers, txId, outputBufferCapacity,
+        writeTxnsTimeoutMs, updateCommittedTxId);
   }
 
   @Override
@@ -462,9 +444,15 @@ public class QuorumJournalManager implements JournalManager {
     loggers.close();
   }
 
-  @Override
   public void selectInputStreams(Collection<EditLogInputStream> streams,
       long fromTxnId, boolean inProgressOk) throws IOException {
+    selectInputStreams(streams, fromTxnId, inProgressOk, false);
+  }
+
+  @Override
+  public void selectInputStreams(Collection<EditLogInputStream> streams,
+      long fromTxnId, boolean inProgressOk,
+      boolean onlyDurableTxns) throws IOException {
 
     QuorumCall<AsyncLogger, RemoteEditLogManifest> q =
         loggers.getEditLogManifest(fromTxnId, inProgressOk);
@@ -481,13 +469,22 @@ public class QuorumJournalManager implements JournalManager {
     for (Map.Entry<AsyncLogger, RemoteEditLogManifest> e : resps.entrySet()) {
       AsyncLogger logger = e.getKey();
       RemoteEditLogManifest manifest = e.getValue();
-      
+      long committedTxnId = manifest.getCommittedTxnId();
+
       for (RemoteEditLog remoteLog : manifest.getLogs()) {
         URL url = logger.buildURLToFetchLogs(remoteLog.getStartTxId());
 
+        long endTxId = remoteLog.getEndTxId();
+
+        // If it's bounded by durable Txns, endTxId could not be larger
+        // than committedTxnId. This ensures the consistency.
+        if (onlyDurableTxns && inProgressOk) {
+          endTxId = Math.min(endTxId, committedTxnId);
+        }
+
         EditLogInputStream elis = EditLogFileInputStream.fromUrl(
             connectionFactory, url, remoteLog.getStartTxId(),
-            remoteLog.getEndTxId(), remoteLog.isInProgress());
+            endTxId, remoteLog.isInProgress());
         allStreams.add(elis);
       }
     }

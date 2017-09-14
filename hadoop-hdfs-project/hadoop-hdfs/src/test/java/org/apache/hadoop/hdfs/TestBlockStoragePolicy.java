@@ -35,6 +35,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.protocol.*;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
+import org.apache.hadoop.hdfs.security.token.block.BlockTokenSecretManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.*;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
@@ -44,9 +45,11 @@ import org.apache.hadoop.hdfs.server.protocol.DatanodeStorage;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.net.NetworkTopology;
 import org.apache.hadoop.net.Node;
+import org.apache.hadoop.security.token.SecretManager;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.PathUtils;
 import org.junit.Assert;
+import static org.junit.Assert.fail;
 import org.junit.Test;
 
 /** Test {@link BlockStoragePolicy} */
@@ -58,7 +61,7 @@ public class TestBlockStoragePolicy {
   static {
     conf = new HdfsConfiguration();
     conf.setLong(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1);
-    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1);
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY, 1);
     POLICY_SUITE = BlockStoragePolicySuite.createDefaultSuite();
     DEFAULT_STORAGE_POLICY = POLICY_SUITE.getDefaultPolicy();
   }
@@ -1268,7 +1271,7 @@ public class TestBlockStoragePolicy {
     }
 
     FileSystem.setDefaultUri(conf, "hdfs://localhost:0");
-    conf.set(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY, "0.0.0.0:0");
+        conf.set(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY, "0.0.0.0:0");
     File baseDir = PathUtils.getTestDir(TestReplicationPolicy.class);
     conf.set(DFSConfigKeys.DFS_NAMENODE_NAME_DIR_KEY,
         new File(baseDir, "name").getPath());
@@ -1397,4 +1400,144 @@ public class TestBlockStoragePolicy {
     }
   }
 
+  @Test
+  public void testStorageTypeCheckAccess(){
+    testStorageTypeCheckAccessResult(new StorageType[]{StorageType.DEFAULT},
+        new StorageType[]{StorageType.DEFAULT}, true);
+
+    testStorageTypeCheckAccessResult(StorageType.EMPTY_ARRAY,
+        StorageType.EMPTY_ARRAY, false);
+
+    testStorageTypeCheckAccessResult(new StorageType[]{StorageType.DISK},
+        StorageType.EMPTY_ARRAY, false);
+
+    testStorageTypeCheckAccessResult(StorageType.EMPTY_ARRAY,
+        new StorageType[]{StorageType.RAM_DISK}, true);
+
+    testStorageTypeCheckAccessResult(new StorageType[]{StorageType.DISK},
+        new StorageType[]{StorageType.DISK}, true);
+
+    testStorageTypeCheckAccessResult(new StorageType[]{StorageType.DISK},
+        new StorageType[]{StorageType.DISK, StorageType.DISK, StorageType.DISK},
+        false);
+
+    testStorageTypeCheckAccessResult(
+        new StorageType[]{StorageType.DISK, StorageType.DISK, StorageType.DISK},
+        new StorageType[]{StorageType.DISK, StorageType.DISK, StorageType.DISK},
+        true);
+
+    testStorageTypeCheckAccessResult(
+        new StorageType[]{StorageType.RAM_DISK, StorageType.SSD},
+        new StorageType[]{StorageType.DISK, StorageType.RAM_DISK,
+            StorageType.SSD},
+        false);
+
+    testStorageTypeCheckAccessResult(
+        new StorageType[]{StorageType.DISK, StorageType.SSD},
+        new StorageType[]{StorageType.SSD},
+        true);
+
+    testStorageTypeCheckAccessResult(new StorageType[]{StorageType.DISK},
+        new StorageType[]{StorageType.RAM_DISK}, false);
+
+    testStorageTypeCheckAccessResult(new StorageType[]{StorageType.DISK},
+        new StorageType[]{StorageType.RAM_DISK, StorageType.SSD,
+            StorageType.ARCHIVE},
+        false);
+
+    testStorageTypeCheckAccessResult(new StorageType[]{StorageType.RAM_DISK,
+        StorageType.SSD, StorageType.ARCHIVE},
+        new StorageType[]{StorageType.DISK}, false);
+
+    testStorageTypeCheckAccessResult(
+        new StorageType[]{StorageType.DISK, StorageType.SSD},
+        new StorageType[]{StorageType.SSD},
+        true);
+
+    testStorageTypeCheckAccessResult(new StorageType[]{StorageType.RAM_DISK},
+        new StorageType[]{StorageType.DISK}, false);
+
+    testStorageTypeCheckAccessResult(
+        new StorageType[]{StorageType.RAM_DISK, StorageType.SSD,
+            StorageType.ARCHIVE},
+        new StorageType[]{StorageType.DISK},
+        false);
+
+    testStorageTypeCheckAccessResult(
+        new StorageType[]{StorageType.RAM_DISK, StorageType.SSD,
+            StorageType.ARCHIVE},
+        new StorageType[]{StorageType.DISK},
+        false);
+
+  }
+
+  private void testStorageTypeCheckAccessResult(StorageType[] requested,
+      StorageType[] allowed, boolean expAccess) {
+    try {
+      BlockTokenSecretManager.checkAccess(requested, allowed, "StorageTypes");
+      if (!expAccess) {
+        fail("No expected access with allowed StorageTypes "
+            + Arrays.toString(allowed) + " and requested StorageTypes "
+            + Arrays.toString(requested));
+      }
+    } catch (SecretManager.InvalidToken e) {
+      if (expAccess) {
+        fail("Expected access with allowed StorageTypes "
+            + Arrays.toString(allowed) + " and requested StorageTypes "
+            + Arrays.toString(requested));
+      }
+    }
+  }
+
+  @Test
+  public void testStorageIDCheckAccess() {
+    testStorageIDCheckAccessResult(
+        new String[]{"DN1-Storage1"},
+        new String[]{"DN1-Storage1"}, true);
+
+    testStorageIDCheckAccessResult(new String[]{"DN1-Storage1", "DN2-Storage1"},
+        new String[]{"DN1-Storage1"},
+        true);
+
+    testStorageIDCheckAccessResult(new String[]{"DN1-Storage1", "DN2-Storage1"},
+        new String[]{"DN1-Storage1", "DN1-Storage2"}, false);
+
+    testStorageIDCheckAccessResult(
+        new String[]{"DN1-Storage1", "DN1-Storage2"},
+        new String[]{"DN1-Storage1"}, true);
+
+    testStorageIDCheckAccessResult(
+        new String[]{"DN1-Storage1", "DN1-Storage2"},
+        new String[]{"DN2-Storage1"}, false);
+
+    testStorageIDCheckAccessResult(
+        new String[]{"DN1-Storage2", "DN2-Storage2"},
+        new String[]{"DN1-Storage1", "DN2-Storage1"}, false);
+
+    testStorageIDCheckAccessResult(new String[0], new String[0], false);
+
+    testStorageIDCheckAccessResult(new String[0], new String[]{"DN1-Storage1"},
+        true);
+
+    testStorageIDCheckAccessResult(new String[]{"DN1-Storage1"}, new String[0],
+        false);
+  }
+
+  private void testStorageIDCheckAccessResult(String[] requested,
+          String[] allowed, boolean expAccess) {
+    try {
+      BlockTokenSecretManager.checkAccess(requested, allowed, "StorageIDs");
+      if (!expAccess) {
+        fail("No expected access with allowed StorageIDs"
+            + Arrays.toString(allowed) + " and requested StorageIDs"
+            + Arrays.toString(requested));
+      }
+    } catch (SecretManager.InvalidToken e) {
+      if (expAccess) {
+        fail("Expected access with allowed StorageIDs "
+            + Arrays.toString(allowed) + " and requested StorageIDs"
+            + Arrays.toString(requested));
+      }
+    }
+  }
 }

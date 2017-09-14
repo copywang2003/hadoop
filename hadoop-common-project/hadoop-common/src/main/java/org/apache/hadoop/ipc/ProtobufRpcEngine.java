@@ -21,34 +21,27 @@ package org.apache.hadoop.ipc;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.protobuf.*;
 import com.google.protobuf.Descriptors.MethodDescriptor;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.io.DataOutputOutputStream;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.ipc.Client.ConnectionId;
 import org.apache.hadoop.ipc.RPC.RpcInvoker;
 import org.apache.hadoop.ipc.protobuf.ProtobufRpcEngineProtos.RequestHeaderProto;
-import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.RpcRequestHeaderProto;
-import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.RpcResponseHeaderProto;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.SecretManager;
 import org.apache.hadoop.security.token.TokenIdentifier;
-import org.apache.hadoop.util.ProtoUtil;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.util.concurrent.AsyncGet;
 import org.apache.htrace.core.TraceScope;
 import org.apache.htrace.core.Tracer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.net.SocketFactory;
-import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
@@ -62,13 +55,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 @InterfaceStability.Evolving
 public class ProtobufRpcEngine implements RpcEngine {
-  public static final Log LOG = LogFactory.getLog(ProtobufRpcEngine.class);
+  public static final Logger LOG =
+      LoggerFactory.getLogger(ProtobufRpcEngine.class);
   private static final ThreadLocal<AsyncGet<Message, Exception>>
       ASYNC_RETURN_MESSAGE = new ThreadLocal<>();
 
-  static { // Register the rpcRequest deserializer for WritableRpcEngine 
+  static { // Register the rpcRequest deserializer for ProtobufRpcEngine
     org.apache.hadoop.ipc.Server.registerProtocolEngine(
-        RPC.RpcKind.RPC_PROTOCOL_BUFFER, RpcRequestWrapper.class,
+        RPC.RpcKind.RPC_PROTOCOL_BUFFER, RpcProtobufRequest.class,
         new Server.ProtoBufRpcInvoker());
   }
 
@@ -145,7 +139,7 @@ public class ProtobufRpcEngine implements RpcEngine {
     private Invoker(Class<?> protocol, Client.ConnectionId connId,
         Configuration conf, SocketFactory factory) {
       this.remoteId = connId;
-      this.client = CLIENTS.getClient(conf, factory, RpcResponseWrapper.class);
+      this.client = CLIENTS.getClient(conf, factory, RpcWritable.Buffer.class);
       this.protocolName = RPC.getProtocolName(protocol);
       this.clientProtocolVersion = RPC
           .getProtocolVersion(protocol);
@@ -192,7 +186,7 @@ public class ProtobufRpcEngine implements RpcEngine {
      * the server.
      */
     @Override
-    public Object invoke(Object proxy, final Method method, Object[] args)
+    public Message invoke(Object proxy, final Method method, Object[] args)
         throws ServiceException {
       long startTime = 0;
       if (LOG.isDebugEnabled()) {
@@ -200,7 +194,8 @@ public class ProtobufRpcEngine implements RpcEngine {
       }
       
       if (args.length != 2) { // RpcController + Message
-        throw new ServiceException("Too many parameters for request. Method: ["
+        throw new ServiceException(
+            "Too many or few parameters for request. Method: ["
             + method.getName() + "]" + ", Expected: 2, Actual: "
             + args.length);
       }
@@ -227,11 +222,11 @@ public class ProtobufRpcEngine implements RpcEngine {
       }
 
 
-      Message theRequest = (Message) args[1];
-      final RpcResponseWrapper val;
+      final Message theRequest = (Message) args[1];
+      final RpcWritable.Buffer val;
       try {
-        val = (RpcResponseWrapper) client.call(RPC.RpcKind.RPC_PROTOCOL_BUFFER,
-            new RpcRequestWrapper(rpcRequestHeader, theRequest), remoteId,
+        val = (RpcWritable.Buffer) client.call(RPC.RpcKind.RPC_PROTOCOL_BUFFER,
+            new RpcProtobufRequest(rpcRequestHeader, theRequest), remoteId,
             fallbackToSimpleAuth);
 
       } catch (Throwable e) {
@@ -255,7 +250,7 @@ public class ProtobufRpcEngine implements RpcEngine {
       }
       
       if (Client.isAsynchronousMode()) {
-        final AsyncGet<RpcResponseWrapper, IOException> arr
+        final AsyncGet<RpcWritable.Buffer, IOException> arr
             = Client.getAsyncRpcResponse();
         final AsyncGet<Message, Exception> asyncGet
             = new AsyncGet<Message, Exception>() {
@@ -277,7 +272,7 @@ public class ProtobufRpcEngine implements RpcEngine {
     }
 
     private Message getReturnMessage(final Method method,
-        final RpcResponseWrapper rrw) throws ServiceException {
+        final RpcWritable.Buffer buf) throws ServiceException {
       Message prototype = null;
       try {
         prototype = getReturnProtoType(method);
@@ -286,8 +281,7 @@ public class ProtobufRpcEngine implements RpcEngine {
       }
       Message returnMessage;
       try {
-        returnMessage = prototype.newBuilderForType()
-            .mergeFrom(rrw.theResponseRead).build();
+        returnMessage = buf.getValue(prototype.getDefaultInstanceForType());
 
         if (LOG.isTraceEnabled()) {
           LOG.trace(Thread.currentThread().getId() + ": Response <- " +
@@ -328,201 +322,12 @@ public class ProtobufRpcEngine implements RpcEngine {
     }
   }
 
-  interface RpcWrapper extends Writable {
-    int getLength();
-  }
-  /**
-   * Wrapper for Protocol Buffer Requests
-   * 
-   * Note while this wrapper is writable, the request on the wire is in
-   * Protobuf. Several methods on {@link org.apache.hadoop.ipc.Server and RPC} 
-   * use type Writable as a wrapper to work across multiple RpcEngine kinds.
-   */
-  private static abstract class RpcMessageWithHeader<T extends GeneratedMessage>
-    implements RpcWrapper {
-    T requestHeader;
-    Message theRequest; // for clientSide, the request is here
-    byte[] theRequestRead; // for server side, the request is here
-
-    public RpcMessageWithHeader() {
-    }
-
-    public RpcMessageWithHeader(T requestHeader, Message theRequest) {
-      this.requestHeader = requestHeader;
-      this.theRequest = theRequest;
-    }
-
-    @Override
-    public void write(DataOutput out) throws IOException {
-      OutputStream os = DataOutputOutputStream.constructOutputStream(out);
-      
-      ((Message)requestHeader).writeDelimitedTo(os);
-      theRequest.writeDelimitedTo(os);
-    }
-
-    @Override
-    public void readFields(DataInput in) throws IOException {
-      requestHeader = parseHeaderFrom(readVarintBytes(in));
-      theRequestRead = readMessageRequest(in);
-    }
-
-    abstract T parseHeaderFrom(byte[] bytes) throws IOException;
-
-    byte[] readMessageRequest(DataInput in) throws IOException {
-      return readVarintBytes(in);
-    }
-
-    private static byte[] readVarintBytes(DataInput in) throws IOException {
-      final int length = ProtoUtil.readRawVarint32(in);
-      final byte[] bytes = new byte[length];
-      in.readFully(bytes);
-      return bytes;
-    }
-
-    public T getMessageHeader() {
-      return requestHeader;
-    }
-
-    public byte[] getMessageBytes() {
-      return theRequestRead;
-    }
-    
-    @Override
-    public int getLength() {
-      int headerLen = requestHeader.getSerializedSize();
-      int reqLen;
-      if (theRequest != null) {
-        reqLen = theRequest.getSerializedSize();
-      } else if (theRequestRead != null ) {
-        reqLen = theRequestRead.length;
-      } else {
-        throw new IllegalArgumentException(
-            "getLength on uninitialized RpcWrapper");      
-      }
-      return CodedOutputStream.computeRawVarint32Size(headerLen) +  headerLen
-          + CodedOutputStream.computeRawVarint32Size(reqLen) + reqLen;
-    }
-  }
-  
-  private static class RpcRequestWrapper
-  extends RpcMessageWithHeader<RequestHeaderProto> {
-    @SuppressWarnings("unused")
-    public RpcRequestWrapper() {}
-    
-    public RpcRequestWrapper(
-        RequestHeaderProto requestHeader, Message theRequest) {
-      super(requestHeader, theRequest);
-    }
-    
-    @Override
-    RequestHeaderProto parseHeaderFrom(byte[] bytes) throws IOException {
-      return RequestHeaderProto.parseFrom(bytes);
-    }
-    
-    @Override
-    public String toString() {
-      return requestHeader.getDeclaringClassProtocolName() + "." +
-          requestHeader.getMethodName();
-    }
-  }
-
-  @InterfaceAudience.LimitedPrivate({"RPC"})
-  public static class RpcRequestMessageWrapper
-  extends RpcMessageWithHeader<RpcRequestHeaderProto> {
-    public RpcRequestMessageWrapper() {}
-    
-    public RpcRequestMessageWrapper(
-        RpcRequestHeaderProto requestHeader, Message theRequest) {
-      super(requestHeader, theRequest);
-    }
-    
-    @Override
-    RpcRequestHeaderProto parseHeaderFrom(byte[] bytes) throws IOException {
-      return RpcRequestHeaderProto.parseFrom(bytes);
-    }
-  }
-
-  @InterfaceAudience.LimitedPrivate({"RPC"})
-  public static class RpcResponseMessageWrapper
-  extends RpcMessageWithHeader<RpcResponseHeaderProto> {
-    public RpcResponseMessageWrapper() {}
-    
-    public RpcResponseMessageWrapper(
-        RpcResponseHeaderProto responseHeader, Message theRequest) {
-      super(responseHeader, theRequest);
-    }
-    
-    @Override
-    byte[] readMessageRequest(DataInput in) throws IOException {
-      // error message contain no message body
-      switch (requestHeader.getStatus()) {
-        case ERROR:
-        case FATAL:
-          return null;
-        default:
-          return super.readMessageRequest(in);
-      }
-    }
-    
-    @Override
-    RpcResponseHeaderProto parseHeaderFrom(byte[] bytes) throws IOException {
-      return RpcResponseHeaderProto.parseFrom(bytes);
-    }
-  }
-
-  /**
-   *  Wrapper for Protocol Buffer Responses
-   * 
-   * Note while this wrapper is writable, the request on the wire is in
-   * Protobuf. Several methods on {@link org.apache.hadoop.ipc.Server and RPC} 
-   * use type Writable as a wrapper to work across multiple RpcEngine kinds.
-   */
-  @InterfaceAudience.LimitedPrivate({"RPC"}) // temporarily exposed 
-  public static class RpcResponseWrapper implements RpcWrapper {
-    Message theResponse; // for senderSide, the response is here
-    byte[] theResponseRead; // for receiver side, the response is here
-
-    public RpcResponseWrapper() {
-    }
-
-    public RpcResponseWrapper(Message message) {
-      this.theResponse = message;
-    }
-
-    @Override
-    public void write(DataOutput out) throws IOException {
-      OutputStream os = DataOutputOutputStream.constructOutputStream(out);
-      theResponse.writeDelimitedTo(os);   
-    }
-
-    @Override
-    public void readFields(DataInput in) throws IOException {
-      int length = ProtoUtil.readRawVarint32(in);
-      theResponseRead = new byte[length];
-      in.readFully(theResponseRead);
-    }
-    
-    @Override
-    public int getLength() {
-      int resLen;
-      if (theResponse != null) {
-        resLen = theResponse.getSerializedSize();
-      } else if (theResponseRead != null ) {
-        resLen = theResponseRead.length;
-      } else {
-        throw new IllegalArgumentException(
-            "getLength on uninitialized RpcWrapper");      
-      }
-      return CodedOutputStream.computeRawVarint32Size(resLen) + resLen;
-    }
-  }
-
   @VisibleForTesting
   @InterfaceAudience.Private
   @InterfaceStability.Unstable
   static Client getClient(Configuration conf) {
     return CLIENTS.getClient(conf, SocketFactory.getDefault(),
-        RpcResponseWrapper.class);
+        RpcWritable.Buffer.class);
   }
   
  
@@ -540,6 +345,60 @@ public class ProtobufRpcEngine implements RpcEngine {
   }
   
   public static class Server extends RPC.Server {
+
+    static final ThreadLocal<ProtobufRpcEngineCallback> currentCallback =
+        new ThreadLocal<>();
+
+    static final ThreadLocal<CallInfo> currentCallInfo = new ThreadLocal<>();
+
+    static class CallInfo {
+      private final RPC.Server server;
+      private final String methodName;
+
+      public CallInfo(RPC.Server server, String methodName) {
+        this.server = server;
+        this.methodName = methodName;
+      }
+    }
+
+    static class ProtobufRpcEngineCallbackImpl
+        implements ProtobufRpcEngineCallback {
+
+      private final RPC.Server server;
+      private final Call call;
+      private final String methodName;
+      private final long setupTime;
+
+      public ProtobufRpcEngineCallbackImpl() {
+        this.server = currentCallInfo.get().server;
+        this.call = Server.getCurCall().get();
+        this.methodName = currentCallInfo.get().methodName;
+        this.setupTime = Time.now();
+      }
+
+      @Override
+      public void setResponse(Message message) {
+        long processingTime = Time.now() - setupTime;
+        call.setDeferredResponse(RpcWritable.wrap(message));
+        server.updateDeferredMetrics(methodName, processingTime);
+      }
+
+      @Override
+      public void error(Throwable t) {
+        long processingTime = Time.now() - setupTime;
+        String detailedMetricsName = t.getClass().getSimpleName();
+        server.updateDeferredMetrics(detailedMetricsName, processingTime);
+        call.setDeferredError(t);
+      }
+    }
+
+    @InterfaceStability.Unstable
+    public static ProtobufRpcEngineCallback registerForDeferredResponse() {
+      ProtobufRpcEngineCallback callback = new ProtobufRpcEngineCallbackImpl();
+      currentCallback.set(callback);
+      return callback;
+    }
+
     /**
      * Construct an RPC server.
      * 
@@ -612,11 +471,10 @@ public class ProtobufRpcEngine implements RpcEngine {
        */
       public Writable call(RPC.Server server, String connectionProtocolName,
           Writable writableRequest, long receiveTime) throws Exception {
-        RpcRequestWrapper request = (RpcRequestWrapper) writableRequest;
-        RequestHeaderProto rpcRequest = request.requestHeader;
+        RpcProtobufRequest request = (RpcProtobufRequest) writableRequest;
+        RequestHeaderProto rpcRequest = request.getRequestHeader();
         String methodName = rpcRequest.getMethodName();
-        
-        
+
         /** 
          * RPCs for a particular interface (ie protocol) are done using a
          * IPC connection that is setup using rpcProxy.
@@ -652,16 +510,25 @@ public class ProtobufRpcEngine implements RpcEngine {
           throw new RpcNoSuchMethodException(msg);
         }
         Message prototype = service.getRequestPrototype(methodDescriptor);
-        Message param = prototype.newBuilderForType()
-            .mergeFrom(request.theRequestRead).build();
-        
+        Message param = request.getValue(prototype);
+
         Message result;
         long startTime = Time.now();
         int qTime = (int) (startTime - receiveTime);
         Exception exception = null;
+        boolean isDeferred = false;
         try {
           server.rpcDetailedMetrics.init(protocolImpl.protocolClass);
+          currentCallInfo.set(new CallInfo(server, methodName));
           result = service.callBlockingMethod(methodDescriptor, null, param);
+          // Check if this needs to be a deferred response,
+          // by checking the ThreadLocal callback being set
+          if (currentCallback.get() != null) {
+            Server.getCurCall().get().deferResponse();
+            isDeferred = true;
+            currentCallback.set(null);
+            return null;
+          }
         } catch (ServiceException e) {
           exception = (Exception) e.getCause();
           throw (Exception) e.getCause();
@@ -669,10 +536,13 @@ public class ProtobufRpcEngine implements RpcEngine {
           exception = e;
           throw e;
         } finally {
+          currentCallInfo.set(null);
           int processingTime = (int) (Time.now() - startTime);
           if (LOG.isDebugEnabled()) {
-            String msg = "Served: " + methodName + " queueTime= " + qTime +
-                " procesingTime= " + processingTime;
+            String msg =
+                "Served: " + methodName + (isDeferred ? ", deferred" : "") +
+                    ", queueTime= " + qTime +
+                    " procesingTime= " + processingTime;
             if (exception != null) {
               msg += " exception= " + exception.getClass().getSimpleName();
             }
@@ -681,9 +551,53 @@ public class ProtobufRpcEngine implements RpcEngine {
           String detailedMetricsName = (exception == null) ?
               methodName :
               exception.getClass().getSimpleName();
-          server.updateMetrics(detailedMetricsName, qTime, processingTime);
+          server.updateMetrics(detailedMetricsName, qTime, processingTime,
+              isDeferred);
         }
-        return new RpcResponseWrapper(result);
+        return RpcWritable.wrap(result);
+      }
+    }
+  }
+
+  // htrace in the ipc layer creates the span name based on toString()
+  // which uses the rpc header.  in the normal case we want to defer decoding
+  // the rpc header until needed by the rpc engine.
+  static class RpcProtobufRequest extends RpcWritable.Buffer {
+    private volatile RequestHeaderProto requestHeader;
+    private Message payload;
+
+    public RpcProtobufRequest() {
+    }
+
+    RpcProtobufRequest(RequestHeaderProto header, Message payload) {
+      this.requestHeader = header;
+      this.payload = payload;
+    }
+
+    RequestHeaderProto getRequestHeader() throws IOException {
+      if (getByteBuffer() != null && requestHeader == null) {
+        requestHeader = getValue(RequestHeaderProto.getDefaultInstance());
+      }
+      return requestHeader;
+    }
+
+    @Override
+    public void writeTo(ResponseBuffer out) throws IOException {
+      requestHeader.writeDelimitedTo(out);
+      if (payload != null) {
+        payload.writeDelimitedTo(out);
+      }
+    }
+
+    // this is used by htrace to name the span.
+    @Override
+    public String toString() {
+      try {
+        RequestHeaderProto header = getRequestHeader();
+        return header.getDeclaringClassProtocolName() + "." +
+               header.getMethodName();
+      } catch (IOException e) {
+        throw new IllegalArgumentException(e);
       }
     }
   }

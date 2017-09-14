@@ -59,6 +59,7 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.datanode.FsDatasetTestUtils;
+import org.apache.hadoop.hdfs.server.namenode.FSDirectory.DirOp;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.Time;
@@ -641,7 +642,7 @@ public class TestFileTruncate {
       String leaseHolder =
           NameNodeAdapter.getLeaseHolderForPath(cluster.getNameNode(),
           p.toUri().getPath());
-      if(leaseHolder.equals(HdfsServerConstants.NAMENODE_LEASE_HOLDER)) {
+      if(leaseHolder.startsWith(HdfsServerConstants.NAMENODE_LEASE_HOLDER)) {
         recoveryTriggered = true;
         break;
       }
@@ -680,13 +681,7 @@ public class TestFileTruncate {
     int toTruncateLength = 1;
     int newLength = startingFileSize - toTruncateLength;
     cluster.getDataNodes().get(dn).shutdown();
-    try {
-      boolean isReady = fs.truncate(p, newLength);
-      assertFalse(isReady);
-    } finally {
-      cluster.restartDataNode(dn, true, true);
-      cluster.waitActive();
-    }
+    truncateAndRestartDN(p, dn, newLength);
     checkBlockRecovery(p);
 
     LocatedBlock newBlock = getLocatedBlocks(p).getLastLocatedBlock();
@@ -700,6 +695,9 @@ public class TestFileTruncate {
     assertEquals(newBlock.getBlock().getGenerationStamp(),
         oldBlock.getBlock().getGenerationStamp() + 1);
 
+    Thread.sleep(2000);
+    // trigger the second time BR to delete the corrupted replica if there's one
+    cluster.triggerBlockReports();
     // Wait replicas come to 3
     DFSTestUtil.waitReplication(fs, p, REPLICATION);
     // Old replica is disregarded and replaced with the truncated one
@@ -736,13 +734,7 @@ public class TestFileTruncate {
     int toTruncateLength = 1;
     int newLength = startingFileSize - toTruncateLength;
     cluster.getDataNodes().get(dn).shutdown();
-    try {
-      boolean isReady = fs.truncate(p, newLength);
-      assertFalse(isReady);
-    } finally {
-      cluster.restartDataNode(dn, true, true);
-      cluster.waitActive();
-    }
+    truncateAndRestartDN(p, dn, newLength);
     checkBlockRecovery(p);
 
     LocatedBlock newBlock = getLocatedBlocks(p).getLastLocatedBlock();
@@ -796,8 +788,8 @@ public class TestFileTruncate {
     boolean isReady = fs.truncate(p, newLength);
     assertFalse(isReady);
 
-    cluster.restartDataNode(dn0, true, true);
-    cluster.restartDataNode(dn1, true, true);
+    cluster.restartDataNode(dn0, false, true);
+    cluster.restartDataNode(dn1, false, true);
     cluster.waitActive();
     checkBlockRecovery(p);
 
@@ -1005,7 +997,7 @@ public class TestFileTruncate {
     byte[] contents = AppendTestUtil.initBuffer(BLOCK_SIZE);
     writeContents(contents, BLOCK_SIZE, srcPath);
 
-    INodesInPath iip = fsn.getFSDirectory().getINodesInPath4Write(src, true);
+    INodesInPath iip = fsn.getFSDirectory().getINodesInPath(src, DirOp.WRITE);
     INodeFile file = iip.getLastINode().asFile();
     long initialGenStamp = file.getLastBlock().getGenerationStamp();
     // Test that prepareFileForTruncate sets up in-place truncate.
@@ -1036,7 +1028,7 @@ public class TestFileTruncate {
     writeContents(contents, BLOCK_SIZE, srcPath);
     fs.allowSnapshot(parent);
     fs.createSnapshot(parent, "ss0");
-    iip = fsn.getFSDirectory().getINodesInPath(src, true);
+    iip = fsn.getFSDirectory().getINodesInPath(src, DirOp.WRITE);
     file = iip.getLastINode().asFile();
     file.recordModification(iip.getLatestSnapshotId(), true);
     assertThat(file.isBlockInLatestSnapshot(
@@ -1237,5 +1229,16 @@ public class TestFileTruncate {
         .dnStartupOption(o!=StartupOption.ROLLBACK ? StartupOption.REGULAR : o)
         .build();
     fs = cluster.getFileSystem();
+  }
+
+  private void truncateAndRestartDN(Path p, int dn, int newLength)
+      throws IOException {
+    try {
+      boolean isReady = fs.truncate(p, newLength);
+      assertFalse(isReady);
+    } finally {
+      cluster.restartDataNode(dn, false, true);
+      cluster.waitActive();
+    }
   }
 }

@@ -21,6 +21,9 @@ package org.apache.hadoop.mapreduce.jobhistory;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -30,6 +33,7 @@ import static org.mockito.Mockito.when;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.HashMap;
 
 import org.apache.commons.logging.Log;
@@ -51,31 +55,38 @@ import org.apache.hadoop.mapreduce.TaskAttemptID;
 import org.apache.hadoop.mapreduce.TaskID;
 import org.apache.hadoop.mapreduce.TaskType;
 import org.apache.hadoop.mapreduce.TypeConverter;
+import org.apache.hadoop.mapreduce.util.JobHistoryEventUtils;
+import org.apache.hadoop.mapreduce.util.MRJobConfUtil;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.app.AppContext;
+import org.apache.hadoop.mapreduce.v2.app.MRAppMaster.RunningAppContext;
 import org.apache.hadoop.mapreduce.v2.app.job.Job;
 import org.apache.hadoop.mapreduce.v2.app.job.JobStateInternal;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JHAdminConfig;
 import org.apache.hadoop.mapreduce.v2.jobhistory.JobHistoryUtils;
 import org.apache.hadoop.mapreduce.v2.util.MRBuilderUtils;
+import org.apache.hadoop.mapreduce.v2.util.MRWebAppUtil;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntities;
 import org.apache.hadoop.yarn.api.records.timeline.TimelineEntity;
+import org.apache.hadoop.yarn.client.api.TimelineClient;
+import org.apache.hadoop.yarn.client.api.TimelineV2Client;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.server.MiniYARNCluster;
 import org.apache.hadoop.yarn.server.timeline.TimelineStore;
-import org.codehaus.jackson.JsonNode;
-import org.codehaus.jackson.map.ObjectMapper;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.mockito.Mockito;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class TestJobHistoryEventHandler {
 
@@ -137,7 +148,7 @@ public class TestJobHistoryEventHandler {
 
       // First completion event, but min-queue-size for batching flushes is 10
       handleEvent(jheh, new JobHistoryEvent(t.jobId, new TaskFinishedEvent(
-          t.taskID, t.taskAttemptID, 0, TaskType.MAP, "", null)));
+          t.taskID, t.taskAttemptID, 0, TaskType.MAP, "", null, 0)));
       verify(mockWriter).flush();
 
     } finally {
@@ -173,7 +184,7 @@ public class TestJobHistoryEventHandler {
 
       for (int i = 0 ; i < 100 ; i++) {
         queueEvent(jheh, new JobHistoryEvent(t.jobId, new TaskFinishedEvent(
-            t.taskID, t.taskAttemptID, 0, TaskType.MAP, "", null)));
+            t.taskID, t.taskAttemptID, 0, TaskType.MAP, "", null, 0)));
       }
 
       handleNextNEvents(jheh, 9);
@@ -218,7 +229,7 @@ public class TestJobHistoryEventHandler {
 
       for (int i = 0 ; i < 100 ; i++) {
         queueEvent(jheh, new JobHistoryEvent(t.jobId, new TaskFinishedEvent(
-            t.taskID, t.taskAttemptID, 0, TaskType.MAP, "", null)));
+            t.taskID, t.taskAttemptID, 0, TaskType.MAP, "", null, 0)));
       }
 
       handleNextNEvents(jheh, 9);
@@ -261,10 +272,11 @@ public class TestJobHistoryEventHandler {
 
       for (int i = 0 ; i < 100 ; i++) {
         queueEvent(jheh, new JobHistoryEvent(t.jobId, new TaskFinishedEvent(
-            t.taskID, t.taskAttemptID, 0, TaskType.MAP, "", null)));
+            t.taskID, t.taskAttemptID, 0, TaskType.MAP, "", null, 0)));
       }
       queueEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
-          TypeConverter.fromYarn(t.jobId), 0, 10, 10, 0, 0, null, null, new Counters())));
+          TypeConverter.fromYarn(t.jobId), 0, 10, 10, 0, 0, 0, 0, null, null,
+          new Counters())));
 
       handleNextNEvents(jheh, 29);
       verify(mockWriter, times(0)).flush();
@@ -297,22 +309,22 @@ public class TestJobHistoryEventHandler {
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId,
         new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
-          0, 0, JobStateInternal.ERROR.toString())));
+          0, 0, 0, 0, 0, 0, JobStateInternal.ERROR.toString())));
       verify(jheh, times(1)).processDoneFiles(any(JobId.class));
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
-        TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, new Counters(),
-        new Counters(), new Counters())));
+          TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, 0, 0, new Counters(),
+          new Counters(), new Counters())));
       verify(jheh, times(2)).processDoneFiles(any(JobId.class));
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId,
         new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
-          0, 0, JobStateInternal.FAILED.toString())));
+          0, 0, 0, 0, 0, 0, JobStateInternal.FAILED.toString())));
       verify(jheh, times(3)).processDoneFiles(any(JobId.class));
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId,
         new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
-          0, 0, JobStateInternal.KILLED.toString())));
+          0, 0, 0, 0, 0, 0, JobStateInternal.KILLED.toString())));
       verify(jheh, times(4)).processDoneFiles(any(JobId.class));
 
       mockWriter = jheh.getEventWriter();
@@ -343,22 +355,22 @@ public class TestJobHistoryEventHandler {
       // skip processing done files
       handleEvent(jheh, new JobHistoryEvent(t.jobId,
         new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
-          0, 0, JobStateInternal.ERROR.toString())));
+          0, 0, 0, 0, 0, 0, JobStateInternal.ERROR.toString())));
       verify(jheh, times(0)).processDoneFiles(t.jobId);
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
-          TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, new Counters(),
+          TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, 0, 0, new Counters(),
           new Counters(), new Counters())));
       verify(jheh, times(1)).processDoneFiles(t.jobId);
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId,
         new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
-          0, 0, JobStateInternal.FAILED.toString())));
+          0, 0, 0, 0, 0, 0, JobStateInternal.FAILED.toString())));
       verify(jheh, times(2)).processDoneFiles(t.jobId);
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId,
         new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
-          0, 0, JobStateInternal.KILLED.toString())));
+          0, 0, 0, 0, 0, 0, JobStateInternal.KILLED.toString())));
       verify(jheh, times(3)).processDoneFiles(t.jobId);
 
       mockWriter = jheh.getEventWriter();
@@ -367,6 +379,75 @@ public class TestJobHistoryEventHandler {
       jheh.stop();
       verify(mockWriter).close();
     }
+  }
+
+  @Test
+  public void testPropertyRedactionForJHS() throws Exception {
+    final Configuration conf = new Configuration();
+
+    String sensitivePropertyName = "aws.fake.credentials.name";
+    String sensitivePropertyValue = "aws.fake.credentials.val";
+    conf.set(sensitivePropertyName, sensitivePropertyValue);
+    conf.set(MRJobConfig.MR_JOB_REDACTED_PROPERTIES,
+        sensitivePropertyName);
+    conf.set(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY,
+        dfsCluster.getURI().toString());
+    final TestParams params = new TestParams();
+    conf.set(MRJobConfig.MR_AM_STAGING_DIR, params.dfsWorkDir);
+
+    final JHEvenHandlerForTest jheh =
+        new JHEvenHandlerForTest(params.mockAppContext, 0, false);
+
+    try {
+      jheh.init(conf);
+      jheh.start();
+      handleEvent(jheh, new JobHistoryEvent(params.jobId,
+          new AMStartedEvent(params.appAttemptId, 200, params.containerId,
+              "nmhost", 3000, 4000, -1)));
+      handleEvent(jheh, new JobHistoryEvent(params.jobId,
+          new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(
+              params.jobId), 0, 0, 0, 0, 0, 0, 0,
+              JobStateInternal.FAILED.toString())));
+
+      // verify the value of the sensitive property in job.xml is restored.
+      Assert.assertEquals(sensitivePropertyName + " is modified.",
+          conf.get(sensitivePropertyName), sensitivePropertyValue);
+
+      // load the job_conf.xml in JHS directory and verify property redaction.
+      Path jhsJobConfFile = getJobConfInIntermediateDoneDir(conf, params.jobId);
+      Assert.assertTrue("The job_conf.xml file is not in the JHS directory",
+          FileContext.getFileContext(conf).util().exists(jhsJobConfFile));
+      Configuration jhsJobConf = new Configuration();
+
+      try (InputStream input = FileSystem.get(conf).open(jhsJobConfFile)) {
+        jhsJobConf.addResource(input);
+        Assert.assertEquals(
+            sensitivePropertyName + " is not redacted in HDFS.",
+            MRJobConfUtil.REDACTION_REPLACEMENT_VAL,
+            jhsJobConf.get(sensitivePropertyName));
+      }
+    } finally {
+      jheh.stop();
+      purgeHdfsHistoryIntermediateDoneDirectory(conf);
+    }
+  }
+
+  private static Path getJobConfInIntermediateDoneDir(Configuration conf,
+      JobId jobId) throws IOException {
+    Path userDoneDir = new Path(
+        JobHistoryUtils.getHistoryIntermediateDoneDirForUser(conf));
+    Path doneDirPrefix =
+        FileContext.getFileContext(conf).makeQualified(userDoneDir);
+    return new Path(
+        doneDirPrefix, JobHistoryUtils.getIntermediateConfFileName(jobId));
+  }
+
+  private void purgeHdfsHistoryIntermediateDoneDirectory(Configuration conf)
+      throws IOException {
+    FileSystem fs = FileSystem.get(dfsCluster.getConfiguration(0));
+    String intermDoneDirPrefix =
+        JobHistoryUtils.getConfiguredHistoryIntermediateDoneDirPrefix(conf);
+    fs.delete(new Path(intermDoneDirPrefix), true);
   }
 
   @Test (timeout=50000)
@@ -397,7 +478,7 @@ public class TestJobHistoryEventHandler {
           t.appAttemptId, 200, t.containerId, "nmhost", 3000, 4000, -1)));
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
-          TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, new Counters(),
+          TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, 0, 0, new Counters(),
           new Counters(), new Counters())));
 
       // If we got here then event handler worked but we don't know with which
@@ -410,6 +491,7 @@ public class TestJobHistoryEventHandler {
           localFileSystem.exists(new Path(t.dfsWorkDir)));
     } finally {
       jheh.stop();
+      purgeHdfsHistoryIntermediateDoneDirectory(conf);
     }
   }
 
@@ -466,7 +548,7 @@ public class TestJobHistoryEventHandler {
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId,
         new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId), 0,
-          0, 0, JobStateInternal.FAILED.toString())));
+          0, 0, 0, 0, 0, 0, JobStateInternal.FAILED.toString())));
 
       Assert.assertEquals(mi.getJobIndexInfo().getSubmitTime(), 100);
       Assert.assertEquals(mi.getJobIndexInfo().getJobStartTime(), 200);
@@ -485,14 +567,12 @@ public class TestJobHistoryEventHandler {
   // stored to the Timeline store
   @Test (timeout=50000)
   public void testTimelineEventHandling() throws Exception {
-    TestParams t = new TestParams(false);
+    TestParams t = new TestParams(RunningAppContext.class, false);
     Configuration conf = new YarnConfiguration();
     conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED, true);
-    MiniYARNCluster yarnCluster = null;
     long currentTime = System.currentTimeMillis();
-    try {
-      yarnCluster = new MiniYARNCluster(
-            TestJobHistoryEventHandler.class.getSimpleName(), 1, 1, 1, 1);
+    try (MiniYARNCluster yarnCluster = new MiniYARNCluster(
+        TestJobHistoryEventHandler.class.getSimpleName(), 1, 1, 1, 1)) {
       yarnCluster.init(conf);
       yarnCluster.start();
       Configuration confJHEH = new YarnConfiguration(conf);
@@ -564,7 +644,7 @@ public class TestJobHistoryEventHandler {
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId,
               new JobFinishedEvent(TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0,
-              0, new Counters(), new Counters(), new Counters()), currentTime));
+              0, 0, 0, new Counters(), new Counters(), new Counters()), currentTime));
       entities = ts.getEntities("MAPREDUCE_JOB", null, null, null,
               null, null, null, null, null, null);
       Assert.assertEquals(1, entities.getEntities().size());
@@ -590,7 +670,8 @@ public class TestJobHistoryEventHandler {
 
       handleEvent(jheh, new JobHistoryEvent(t.jobId,
             new JobUnsuccessfulCompletionEvent(TypeConverter.fromYarn(t.jobId),
-            0, 0, 0, JobStateInternal.KILLED.toString()), currentTime + 20));
+            0, 0, 0, 0, 0, 0, 0, JobStateInternal.KILLED.toString()),
+            currentTime + 20));
       entities = ts.getEntities("MAPREDUCE_JOB", null, null, null,
               null, null, null, null, null, null);
       Assert.assertEquals(1, entities.getEntities().size());
@@ -645,10 +726,6 @@ public class TestJobHistoryEventHandler {
               tEntity.getEvents().get(0).getEventInfo().get("TASK_TYPE"));
       Assert.assertEquals(TaskType.MAP.toString(),
               tEntity.getEvents().get(1).getEventInfo().get("TASK_TYPE"));
-    } finally {
-      if (yarnCluster != null) {
-        yarnCluster.stop();
-      }
     }
   }
 
@@ -669,7 +746,7 @@ public class TestJobHistoryEventHandler {
     group2.addCounter("MARTHA_JONES", "Martha Jones", 3);
     group2.addCounter("DONNA_NOBLE", "Donna Noble", 2);
     group2.addCounter("ROSE_TYLER", "Rose Tyler", 1);
-    JsonNode jsonNode = jheh.countersToJSON(counters);
+    JsonNode jsonNode = JobHistoryEventUtils.countersToJSON(counters);
     String jsonStr = new ObjectMapper().writeValueAsString(jsonNode);
     String expected = "[{\"NAME\":\"COMPANIONS\",\"DISPLAY_NAME\":\"Companions "
         + "of the Doctor\",\"COUNTERS\":[{\"NAME\":\"AMY_POND\",\"DISPLAY_NAME\""
@@ -692,19 +769,19 @@ public class TestJobHistoryEventHandler {
   public void testCountersToJSONEmpty() throws Exception {
     JobHistoryEventHandler jheh = new JobHistoryEventHandler(null, 0);
     Counters counters = null;
-    JsonNode jsonNode = jheh.countersToJSON(counters);
+    JsonNode jsonNode = JobHistoryEventUtils.countersToJSON(counters);
     String jsonStr = new ObjectMapper().writeValueAsString(jsonNode);
     String expected = "[]";
     Assert.assertEquals(expected, jsonStr);
 
     counters = new Counters();
-    jsonNode = jheh.countersToJSON(counters);
+    jsonNode = JobHistoryEventUtils.countersToJSON(counters);
     jsonStr = new ObjectMapper().writeValueAsString(jsonNode);
     expected = "[]";
     Assert.assertEquals(expected, jsonStr);
 
     counters.addGroup("DOCTORS", "Incarnations of the Doctor");
-    jsonNode = jheh.countersToJSON(counters);
+    jsonNode = JobHistoryEventUtils.countersToJSON(counters);
     jsonStr = new ObjectMapper().writeValueAsString(jsonNode);
     expected = "[{\"NAME\":\"DOCTORS\",\"DISPLAY_NAME\":\"Incarnations of the "
         + "Doctor\",\"COUNTERS\":[]}]";
@@ -740,20 +817,32 @@ public class TestJobHistoryEventHandler {
     }
   }
 
-  private AppContext mockAppContext(ApplicationId appId, boolean isLastAMRetry) {
-    JobId jobId = TypeConverter.toYarn(TypeConverter.fromYarn(appId));
-    AppContext mockContext = mock(AppContext.class);
+  private Job mockJob() {
     Job mockJob = mock(Job.class);
     when(mockJob.getAllCounters()).thenReturn(new Counters());
     when(mockJob.getTotalMaps()).thenReturn(10);
     when(mockJob.getTotalReduces()).thenReturn(10);
     when(mockJob.getName()).thenReturn("mockjob");
+    return mockJob;
+  }
+
+  private AppContext mockAppContext(Class<? extends AppContext> contextClass,
+      ApplicationId appId, boolean isLastAMRetry) {
+    JobId jobId = TypeConverter.toYarn(TypeConverter.fromYarn(appId));
+    AppContext mockContext = mock(contextClass);
+    Job mockJob = mockJob();
     when(mockContext.getJob(jobId)).thenReturn(mockJob);
     when(mockContext.getApplicationID()).thenReturn(appId);
     when(mockContext.isLastAMRetry()).thenReturn(isLastAMRetry);
+    if (mockContext instanceof RunningAppContext) {
+      when(((RunningAppContext)mockContext).getTimelineClient()).
+          thenReturn(TimelineClient.createTimelineClient());
+      when(((RunningAppContext) mockContext).getTimelineV2Client())
+          .thenReturn(TimelineV2Client
+              .createTimelineClient(ApplicationId.newInstance(0, 1)));
+    }
     return mockContext;
   }
-
 
   private class TestParams {
     boolean isLastAMRetry;
@@ -769,11 +858,15 @@ public class TestJobHistoryEventHandler {
     AppContext mockAppContext;
 
     public TestParams() {
-      this(false);
+      this(AppContext.class, false);
     }
     public TestParams(boolean isLastAMRetry) {
+      this(AppContext.class, isLastAMRetry);
+    }
+    public TestParams(Class<? extends AppContext> contextClass,
+        boolean isLastAMRetry) {
       this.isLastAMRetry = isLastAMRetry;
-      mockAppContext = mockAppContext(appId, this.isLastAMRetry);
+      mockAppContext = mockAppContext(contextClass, appId, this.isLastAMRetry);
     }
   }
 
@@ -834,6 +927,104 @@ public class TestJobHistoryEventHandler {
         jheh.lastEventHandled.getHistoryEvent()
         instanceof JobUnsuccessfulCompletionEvent);
   }
+
+  @Test (timeout=50000)
+  public void testSetTrackingURLAfterHistoryIsWritten() throws Exception {
+    TestParams t = new TestParams(true);
+    Configuration conf = new Configuration();
+
+    JHEvenHandlerForTest realJheh =
+        new JHEvenHandlerForTest(t.mockAppContext, 0, false);
+    JHEvenHandlerForTest jheh = spy(realJheh);
+    jheh.init(conf);
+
+    try {
+      jheh.start();
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new AMStartedEvent(
+          t.appAttemptId, 200, t.containerId, "nmhost", 3000, 4000, -1)));
+      verify(jheh, times(0)).processDoneFiles(any(JobId.class));
+      verify(t.mockAppContext, times(0)).setHistoryUrl(any(String.class));
+
+      // Job finishes and successfully writes history
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
+          TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, 0, 0, new Counters(),
+          new Counters(), new Counters())));
+
+      verify(jheh, times(1)).processDoneFiles(any(JobId.class));
+      String historyUrl = MRWebAppUtil.getApplicationWebURLOnJHSWithScheme(
+          conf, t.mockAppContext.getApplicationID());
+      verify(t.mockAppContext, times(1)).setHistoryUrl(historyUrl);
+    } finally {
+      jheh.stop();
+    }
+  }
+
+  @Test (timeout=50000)
+  public void testDontSetTrackingURLIfHistoryWriteFailed() throws Exception {
+    TestParams t = new TestParams(true);
+    Configuration conf = new Configuration();
+
+    JHEvenHandlerForTest realJheh =
+        new JHEvenHandlerForTest(t.mockAppContext, 0, false);
+    JHEvenHandlerForTest jheh = spy(realJheh);
+    jheh.init(conf);
+
+    try {
+      jheh.start();
+      doReturn(false).when(jheh).moveToDoneNow(any(Path.class),
+          any(Path.class));
+      doNothing().when(jheh).moveTmpToDone(any(Path.class));
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new AMStartedEvent(
+          t.appAttemptId, 200, t.containerId, "nmhost", 3000, 4000, -1)));
+      verify(jheh, times(0)).processDoneFiles(any(JobId.class));
+      verify(t.mockAppContext, times(0)).setHistoryUrl(any(String.class));
+
+      // Job finishes, but doesn't successfully write history
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
+          TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, 0, 0, new Counters(),
+          new Counters(), new Counters())));
+      verify(jheh, times(1)).processDoneFiles(any(JobId.class));
+      verify(t.mockAppContext, times(0)).setHistoryUrl(any(String.class));
+
+    } finally {
+      jheh.stop();
+    }
+  }
+  @Test (timeout=50000)
+  public void testDontSetTrackingURLIfHistoryWriteThrows() throws Exception {
+    TestParams t = new TestParams(true);
+    Configuration conf = new Configuration();
+
+    JHEvenHandlerForTest realJheh =
+        new JHEvenHandlerForTest(t.mockAppContext, 0, false);
+    JHEvenHandlerForTest jheh = spy(realJheh);
+    jheh.init(conf);
+
+    try {
+      jheh.start();
+      doThrow(new YarnRuntimeException(new IOException()))
+          .when(jheh).processDoneFiles(any(JobId.class));
+      handleEvent(jheh, new JobHistoryEvent(t.jobId, new AMStartedEvent(
+          t.appAttemptId, 200, t.containerId, "nmhost", 3000, 4000, -1)));
+      verify(jheh, times(0)).processDoneFiles(any(JobId.class));
+      verify(t.mockAppContext, times(0)).setHistoryUrl(any(String.class));
+
+      // Job finishes, but doesn't successfully write history
+      try {
+        handleEvent(jheh, new JobHistoryEvent(t.jobId, new JobFinishedEvent(
+            TypeConverter.fromYarn(t.jobId), 0, 0, 0, 0, 0, 0, 0,
+            new Counters(), new Counters(), new Counters())));
+        throw new RuntimeException(
+            "processDoneFiles didn't throw, but should have");
+      } catch (YarnRuntimeException yre) {
+        // Exception expected, do nothing
+      }
+      verify(jheh, times(1)).processDoneFiles(any(JobId.class));
+      verify(t.mockAppContext, times(0)).setHistoryUrl(any(String.class));
+    } finally {
+      jheh.stop();
+    }
+  }
 }
 
 class JHEvenHandlerForTest extends JobHistoryEventHandler {
@@ -855,6 +1046,8 @@ class JHEvenHandlerForTest extends JobHistoryEventHandler {
   protected void serviceStart() {
     if (timelineClient != null) {
       timelineClient.start();
+    } else if (timelineV2Client != null) {
+      timelineV2Client.start();
     }
   }
 

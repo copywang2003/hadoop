@@ -85,6 +85,7 @@ import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.Write;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * DFSClient configuration.
@@ -233,9 +234,10 @@ public class DfsClientConf {
     connectToDnViaHostname = conf.getBoolean(DFS_CLIENT_USE_DN_HOSTNAME,
         DFS_CLIENT_USE_DN_HOSTNAME_DEFAULT);
 
-    datanodeRestartTimeout = conf.getLong(
+    datanodeRestartTimeout = conf.getTimeDuration(
         DFS_CLIENT_DATANODE_RESTART_TIMEOUT_KEY,
-        DFS_CLIENT_DATANODE_RESTART_TIMEOUT_DEFAULT) * 1000;
+        DFS_CLIENT_DATANODE_RESTART_TIMEOUT_DEFAULT,
+        TimeUnit.SECONDS) * 1000;
     slowIoWarningThresholdMs = conf.getLong(
         DFS_CLIENT_SLOW_IO_WARNING_THRESHOLD_KEY,
         DFS_CLIENT_SLOW_IO_WARNING_THRESHOLD_DEFAULT);
@@ -282,7 +284,7 @@ public class DfsClientConf {
     return classes;
   }
 
-  private DataChecksum.Type getChecksumType(Configuration conf) {
+  private static DataChecksum.Type getChecksumType(Configuration conf) {
     final String checksum = conf.get(
         DFS_CHECKSUM_TYPE_KEY,
         DFS_CHECKSUM_TYPE_DEFAULT);
@@ -297,7 +299,7 @@ public class DfsClientConf {
   }
 
   // Construct a checksum option from conf
-  private ChecksumOpt getChecksumOptFromConf(Configuration conf) {
+  public static ChecksumOpt getChecksumOptFromConf(Configuration conf) {
     DataChecksum.Type type = getChecksumType(conf);
     int bytesPerChecksum = conf.getInt(DFS_BYTES_PER_CHECKSUM_KEY,
         DFS_BYTES_PER_CHECKSUM_DEFAULT);
@@ -591,6 +593,10 @@ public class DfsClientConf {
     private final long shortCircuitStreamsCacheExpiryMs;
     private final int shortCircuitSharedMemoryWatcherInterruptCheckMs;
 
+    // Short Circuit Read Metrics
+    private final boolean scrMetricsEnabled;
+    private final int scrMetricsSamplingPercentage;
+
     private final boolean shortCircuitMmapEnabled;
     private final int shortCircuitMmapCacheSize;
     private final long shortCircuitMmapCacheExpiryMs;
@@ -613,6 +619,20 @@ public class DfsClientConf {
       shortCircuitLocalReads = conf.getBoolean(
           Read.ShortCircuit.KEY,
           Read.ShortCircuit.DEFAULT);
+      int scrSamplingPercentage = conf.getInt(
+          Read.ShortCircuit.METRICS_SAMPLING_PERCENTAGE_KEY,
+          Read.ShortCircuit.METRICS_SAMPLING_PERCENTAGE_DEFAULT);
+      if (scrSamplingPercentage <= 0) {
+        scrMetricsSamplingPercentage = 0;
+        scrMetricsEnabled = false;
+      } else if (scrSamplingPercentage > 100) {
+        scrMetricsSamplingPercentage = 100;
+        scrMetricsEnabled = true;
+      } else {
+        scrMetricsSamplingPercentage = scrSamplingPercentage;
+        scrMetricsEnabled = true;
+      }
+
       domainSocketDataTraffic = conf.getBoolean(
           DFS_CLIENT_DOMAIN_SOCKET_DATA_TRAFFIC,
           DFS_CLIENT_DOMAIN_SOCKET_DATA_TRAFFIC_DEFAULT);
@@ -689,6 +709,14 @@ public class DfsClientConf {
 
     public boolean isShortCircuitLocalReads() {
       return shortCircuitLocalReads;
+    }
+
+    public boolean isScrMetricsEnabled() {
+      return scrMetricsEnabled;
+    }
+
+    public int getScrMetricsSamplingPercentage() {
+      return scrMetricsSamplingPercentage;
     }
 
     public boolean isDomainSocketDataTraffic() {

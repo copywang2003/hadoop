@@ -58,6 +58,7 @@ Many subcommands honor a common set of configuration options to alter their beha
 | `-conf <configuration file> ` | Specify an application configuration file. |
 | `-D <property>=<value> ` | Use value for given property. |
 | `-files <comma separated list of files> ` | Specify comma separated files to be copied to the map reduce cluster. Applies only to job. |
+| `-fs <file:///> or <hdfs://namenode:port>` | Specify default filesystem URL to use. Overrides 'fs.defaultFS' property from configurations. |
 | `-jt <local> or <resourcemanager:port>` | Specify a ResourceManager. Applies only to job. |
 | `-libjars <comma seperated list of jars> ` | Specify comma separated jar files to include in the classpath. Applies only to job. |
 
@@ -202,7 +203,15 @@ Manage keys via the KeyProvider. For details on KeyProviders, see the [Transpare
 
 Providers frequently require that a password or other secret is supplied. If the provider requires a password and is unable to find one, it will use a default password and emit a warning message that the default password is being used. If the `-strict` flag is supplied, the warning message becomes an error message and the command returns immediately with an error status.
 
-NOTE: Some KeyProviders (e.g. org.apache.hadoop.crypto.key.JavaKeyStoreProvider) does not support uppercase key names.
+NOTE: Some KeyProviders (e.g. org.apache.hadoop.crypto.key.JavaKeyStoreProvider) do not support uppercase key names.
+
+NOTE: Some KeyProviders do not directly execute a key deletion (e.g. performs a soft-delete instead, or delay the actual deletion, to prevent mistake). In these cases, one may encounter errors when creating/deleting a key with the same name after deleting it. Please check the underlying KeyProvider for details.
+
+### `kms`
+
+Usage: `hadoop kms`
+
+Run KMS, the Key Management Server.
 
 ### `trace`
 
@@ -219,6 +228,12 @@ Prints the version.
 Usage: `hadoop CLASSNAME`
 
 Runs the class named `CLASSNAME`. The class must be part of a package.
+
+### `envvars`
+
+Usage: `hadoop envvars`
+
+Display computed Hadoop environment variables.
 
 Administration Commands
 -----------------------
@@ -248,17 +263,18 @@ Example:
 Note that the setting is not permanent and will be reset when the daemon is restarted.
 This command works by sending a HTTP/HTTPS request to the daemon's internal Jetty servlet, so it supports the following daemons:
 
+* Common
+    * key management server
 * HDFS
     * name node
     * secondary name node
     * data node
     * journal node
+    * HttpFS server
 * YARN
     * resource manager
     * node manager
     * Timeline server
-
-However, the command does not support KMS server, because its web interface is based on Tomcat, which does not support the servlet.
 
 
 Files

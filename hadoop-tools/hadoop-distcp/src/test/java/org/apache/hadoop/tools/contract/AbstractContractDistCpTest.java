@@ -19,9 +19,8 @@
 package org.apache.hadoop.tools.contract;
 
 import static org.apache.hadoop.fs.contract.ContractTestUtils.*;
-import static org.junit.Assert.*;
 
-import java.util.Arrays;
+import java.util.Collections;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -160,7 +159,7 @@ public abstract class AbstractContractDistCpTest
     Path inputFile3 = new Path(inputDir, "file3");
     mkdirs(srcFS, inputDir);
     int fileSizeKb = conf.getInt("scale.test.distcp.file.size.kb", 10 * 1024);
-    int fileSizeMb = fileSizeKb * 1024;
+    int fileSizeMb = fileSizeKb / 1024;
     getLog().info("{} with file size {}", testName.getMethodName(), fileSizeMb);
     byte[] data1 = dataset((fileSizeMb + 1) * 1024 * 1024, 33, 43);
     createFile(srcFS, inputFile1, true, data1);
@@ -184,7 +183,8 @@ public abstract class AbstractContractDistCpTest
    * @throws Exception if there is a failure
    */
   private void runDistCp(Path src, Path dst) throws Exception {
-    DistCpOptions options = new DistCpOptions(Arrays.asList(src), dst);
+    DistCpOptions options = new DistCpOptions.Builder(
+        Collections.singletonList(src), dst).build();
     Job job = new DistCp(conf, options).execute();
     assertNotNull("Unexpected null job returned from DistCp execution.", job);
     assertTrue("DistCp job did not complete.", job.isComplete());

@@ -153,7 +153,7 @@ public final class Utils {
         out.writeLong(n);
         return;
       default:
-        throw new RuntimeException("Internel error");
+        throw new RuntimeException("Internal error");
     }
   }
 
@@ -395,7 +395,7 @@ public final class Utils {
 
     @Override
     public int hashCode() {
-      return (major << 16 + minor);
+      return (major << 16) + minor;
     }
   }
 

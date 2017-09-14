@@ -23,6 +23,7 @@ import java.util.concurrent.ConcurrentMap;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.ha.HAServiceProtocol.HAServiceState;
+import org.apache.hadoop.yarn.ams.ApplicationMasterServiceContext;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.conf.ConfigurationProvider;
@@ -34,8 +35,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMDelegatedNodeL
 import org.apache.hadoop.yarn.server.resourcemanager.placement.PlacementManager;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSystem;
+import org.apache.hadoop.yarn.server.resourcemanager.resource.ResourceProfilesManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.AMLivelinessMonitor;
+import org.apache.hadoop.yarn.server.resourcemanager.rmapp.monitor.RMAppLifetimeMonitor;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.ContainerAllocationExpirer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
@@ -47,11 +50,12 @@ import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRen
 import org.apache.hadoop.yarn.server.resourcemanager.security.NMTokenSecretManagerInRM;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMDelegationTokenSecretManager;
+import org.apache.hadoop.yarn.server.resourcemanager.timelineservice.RMTimelineCollectorManager;
 
 /**
  * Context of the ResourceManager.
  */
-public interface RMContext {
+public interface RMContext extends ApplicationMasterServiceContext {
 
   Dispatcher getDispatcher();
 
@@ -113,6 +117,11 @@ public interface RMContext {
 
   SystemMetricsPublisher getSystemMetricsPublisher();
 
+  void setRMTimelineCollectorManager(
+      RMTimelineCollectorManager timelineCollectorManager);
+
+  RMTimelineCollectorManager getRMTimelineCollectorManager();
+
   ConfigurationProvider getConfigurationProvider();
 
   boolean isWorkPreservingRecoveryEnabled();
@@ -138,9 +147,21 @@ public interface RMContext {
   
   void setQueuePlacementManager(PlacementManager placementMgr);
 
-  void setLeaderElectorService(LeaderElectorService elector);
+  void setLeaderElectorService(EmbeddedElector elector);
 
-  LeaderElectorService getLeaderElectorService();
+  EmbeddedElector getLeaderElectorService();
 
   QueueLimitCalculator getNodeManagerQueueLimitCalculator();
+
+  void setRMAppLifetimeMonitor(RMAppLifetimeMonitor rmAppLifetimeMonitor);
+
+  RMAppLifetimeMonitor getRMAppLifetimeMonitor();
+
+  String getHAZookeeperConnectionState();
+
+  ResourceManager getResourceManager();
+
+  ResourceProfilesManager getResourceProfilesManager();
+
+  void setResourceProfilesManager(ResourceProfilesManager mgr);
 }

@@ -15,20 +15,7 @@
 ViewFs Guide
 ============
 
-* [ViewFs Guide](#ViewFs_Guide)
-    * [Introduction](#Introduction)
-    * [The Old World (Prior to Federation)](#The_Old_World_Prior_to_Federation)
-        * [Single Namenode Clusters](#Single_Namenode_Clusters)
-        * [Pathnames Usage Patterns](#Pathnames_Usage_Patterns)
-        * [Pathname Usage Best Practices](#Pathname_Usage_Best_Practices)
-    * [New World – Federation and ViewFs](#New_World__Federation_and_ViewFs)
-        * [How The Clusters Look](#How_The_Clusters_Look)
-        * [A Global Namespace Per Cluster Using ViewFs](#A_Global_Namespace_Per_Cluster_Using_ViewFs)
-        * [Pathname Usage Patterns](#Pathname_Usage_Patterns)
-        * [Pathname Usage Best Practices](#Pathname_Usage_Best_Practices)
-        * [Renaming Pathnames Across Namespaces](#Renaming_Pathnames_Across_Namespaces)
-        * [FAQ](#FAQ)
-    * [Appendix: A Mount Table Configuration Example](#Appendix:_A_Mount_Table_Configuration_Example)
+<!-- MACRO{toc|fromDepth=0|toDepth=3} -->
 
 Introduction
 ------------
@@ -108,7 +95,7 @@ The mount points of a mount table are specified in the standard Hadoop configura
 
 ```xml
 <property>
-  <name>fs.default.name</name>
+  <name>fs.defaultFS</name>
   <value>viewfs://clusterX</value>
 </property>
 ```
@@ -131,7 +118,7 @@ Hence on Cluster X, where the `core-site.xml` is set to make the default fs to u
 
     * It is an URI for referring a pathname on another cluster such as Cluster Y. In particular, the command for copying files from cluster Y to Cluster Z looks like:
 
-            distcp viewfs://clusterY:/pathSrc viewfs://clusterZ/pathDest
+            distcp viewfs://clusterY/pathSrc viewfs://clusterZ/pathDest
 
 4.  `viewfs://clusterX-webhdfs/foo/bar`
 
@@ -143,7 +130,7 @@ Hence on Cluster X, where the `core-site.xml` is set to make the default fs to u
 
 ### Pathname Usage Best Practices
 
-When one is within a cluster, it is recommended to use the pathname of type (1) above instead of a fully qualified URI like (2). Futher, applications should not use the knowledge of the mount points and use a path like `hdfs://namenodeContainingUserDirs:port/joe/foo/bar` to refer to a file in a particular namenode. One should use `/user/joe/foo/bar` instead.
+When one is within a cluster, it is recommended to use the pathname of type (1) above instead of a fully qualified URI like (2). Further, applications should not use the knowledge of the mount points and use a path like `hdfs://namenodeContainingUserDirs:port/joe/foo/bar` to refer to a file in a particular namenode. One should use `/user/joe/foo/bar` instead.
 
 ### Renaming Pathnames Across Namespaces
 

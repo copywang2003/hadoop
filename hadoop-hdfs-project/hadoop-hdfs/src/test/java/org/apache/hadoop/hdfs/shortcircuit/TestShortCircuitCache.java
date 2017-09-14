@@ -34,6 +34,8 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
+import net.jcip.annotations.NotThreadSafe;
+import org.apache.commons.collections.map.LinkedMap;
 import org.apache.commons.lang.mutable.MutableBoolean;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -50,6 +52,7 @@ import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.net.DomainPeer;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.DatanodeInfo.DatanodeInfoBuilder;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.datanode.BlockMetadataHeader;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeFaultInjector;
@@ -79,6 +82,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.collect.HashMultimap;
 
+@NotThreadSafe
 public class TestShortCircuitCache {
   static final Log LOG = LogFactory.getLog(TestShortCircuitCache.class);
   
@@ -429,8 +433,9 @@ public class TestShortCircuitCache {
     DomainPeer peer = getDomainPeerToDn(conf);
     MutableBoolean usedPeer = new MutableBoolean(false);
     ExtendedBlockId blockId = new ExtendedBlockId(123, "xyz");
-    final DatanodeInfo datanode =
-        new DatanodeInfo(cluster.getDataNodes().get(0).getDatanodeId());
+    final DatanodeInfo datanode = new DatanodeInfoBuilder()
+        .setNodeID(cluster.getDataNodes().get(0).getDatanodeId())
+        .build();
     // Allocating the first shm slot requires using up a peer.
     Slot slot = cache.allocShmSlot(datanode, peer, usedPeer,
                     blockId, "testAllocShm_client");
@@ -502,8 +507,8 @@ public class TestShortCircuitCache {
       public void visit(int numOutstandingMmaps,
           Map<ExtendedBlockId, ShortCircuitReplica> replicas,
           Map<ExtendedBlockId, InvalidToken> failedLoads,
-          Map<Long, ShortCircuitReplica> evictable,
-          Map<Long, ShortCircuitReplica> evictableMmapped) {
+          LinkedMap evictable,
+          LinkedMap evictableMmapped) {
         ShortCircuitReplica replica = replicas.get(
             ExtendedBlockId.fromExtendedBlock(block));
         Assert.assertNotNull(replica);
@@ -518,8 +523,8 @@ public class TestShortCircuitCache {
       public void visit(int numOutstandingMmaps,
           Map<ExtendedBlockId, ShortCircuitReplica> replicas,
           Map<ExtendedBlockId, InvalidToken> failedLoads,
-          Map<Long, ShortCircuitReplica> evictable,
-          Map<Long, ShortCircuitReplica> evictableMmapped) {
+          LinkedMap evictable,
+          LinkedMap evictableMmapped) {
         ShortCircuitReplica replica = replicas.get(
             ExtendedBlockId.fromExtendedBlock(block));
         Assert.assertNotNull(replica);
@@ -570,8 +575,9 @@ public class TestShortCircuitCache {
     Assert.assertTrue(Arrays.equals(contents, expected));
     // Loading this file brought the ShortCircuitReplica into our local
     // replica cache.
-    final DatanodeInfo datanode =
-        new DatanodeInfo(cluster.getDataNodes().get(0).getDatanodeId());
+    final DatanodeInfo datanode = new DatanodeInfoBuilder()
+        .setNodeID(cluster.getDataNodes().get(0).getDatanodeId())
+        .build();
     cache.getDfsClientShmManager().visit(new Visitor() {
       @Override
       public void visit(HashMap<DatanodeInfo, PerDatanodeVisitorInfo> info)
@@ -719,8 +725,8 @@ public class TestShortCircuitCache {
         throw new IOException("injected error into sendShmResponse");
       }
     }).when(failureInjector).sendShortCircuitShmResponse();
-    DataNodeFaultInjector prevInjector = DataNodeFaultInjector.instance;
-    DataNodeFaultInjector.instance = failureInjector;
+    DataNodeFaultInjector prevInjector = DataNodeFaultInjector.get();
+    DataNodeFaultInjector.set(failureInjector);
 
     try {
       // The first read will try to allocate a shared memory segment and slot.
@@ -737,7 +743,7 @@ public class TestShortCircuitCache {
         cluster.getDataNodes().get(0).getShortCircuitRegistry());
 
     LOG.info("Clearing failure injector and performing another read...");
-    DataNodeFaultInjector.instance = prevInjector;
+    DataNodeFaultInjector.set(prevInjector);
 
     fs.getClient().getClientContext().getDomainSocketFactory().clearPathMap();
 

@@ -36,17 +36,20 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceUsage;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.policy.QueueOrderingPolicy;
+import org.apache.hadoop.yarn.server.scheduler.SchedulerRequestKey;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CSQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.LeafQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.ParentQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.QueueCapacities;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.SchedulingMode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.UsersManager.User;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.preemption.PreemptionManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerApp;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.fica.FiCaSchedulerNode;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.ContainerPreemptEvent;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.SchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.policy.OrderingPolicy;
 import org.apache.hadoop.yarn.util.Clock;
 import org.apache.hadoop.yarn.util.resource.DefaultResourceCalculator;
@@ -61,13 +64,18 @@ import org.mockito.stubbing.Answer;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import org.apache.hadoop.yarn.event.Event;
 
 import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Matchers.isA;
 import static org.mockito.Mockito.doAnswer;
@@ -89,7 +97,8 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
   Clock mClock = null;
   CapacitySchedulerConfiguration conf = null;
   CapacityScheduler cs = null;
-  EventHandler<SchedulerEvent> mDisp = null;
+  @SuppressWarnings("rawtypes")
+  EventHandler<Event> mDisp = null;
   ProportionalCapacityPreemptionPolicy policy = null;
   Resource clusterResource = null;
 
@@ -162,12 +171,16 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
         mClock);
   }
 
-  private void mockContainers(String containersConfig, ApplicationAttemptId attemptId,
-      String queueName, List<RMContainer> reservedContainers,
-      List<RMContainer> liveContainers) {
+  private void mockContainers(String containersConfig, FiCaSchedulerApp app,
+      ApplicationAttemptId attemptId, String queueName,
+      List<RMContainer> reservedContainers, List<RMContainer> liveContainers) {
     int containerId = 1;
     int start = containersConfig.indexOf("=") + 1;
     int end = -1;
+
+    Resource used = Resource.newInstance(0, 0);
+    Resource pending = Resource.newInstance(0, 0);
+    Priority pri = Priority.newInstance(0);
 
     while (start < containersConfig.length()) {
       while (start < containersConfig.length()
@@ -190,41 +203,53 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
 
       // now we found start/end, get container values
       String[] values = containersConfig.substring(start + 1, end).split(",");
-      if (values.length != 6) {
+      if (values.length < 6 || values.length > 8) {
         throw new IllegalArgumentException("Format to define container is:"
-            + "(priority,resource,host,expression,repeat,reserved)");
+            + "(priority,resource,host,expression,repeat,reserved, pending)");
       }
-      Priority pri = Priority.newInstance(Integer.valueOf(values[0]));
+      pri.setPriority(Integer.valueOf(values[0]));
       Resource res = parseResourceFromString(values[1]);
       NodeId host = NodeId.newInstance(values[2], 1);
-      String exp = values[3];
+      String label = values[3];
+      String userName = "user";
       int repeat = Integer.valueOf(values[4]);
       boolean reserved = Boolean.valueOf(values[5]);
+      if (values.length >= 7) {
+        Resources.addTo(pending, parseResourceFromString(values[6]));
+      }
+      if (values.length == 8) {
+        userName = values[7];
+      }
 
       for (int i = 0; i < repeat; i++) {
         Container c = mock(Container.class);
+        Resources.addTo(used, res);
         when(c.getResource()).thenReturn(res);
         when(c.getPriority()).thenReturn(pri);
+        SchedulerRequestKey sk = SchedulerRequestKey.extractFrom(c);
         RMContainerImpl rmc = mock(RMContainerImpl.class);
+        when(rmc.getAllocatedSchedulerKey()).thenReturn(sk);
         when(rmc.getAllocatedNode()).thenReturn(host);
-        when(rmc.getNodeLabelExpression()).thenReturn(exp);
+        when(rmc.getNodeLabelExpression()).thenReturn(label);
         when(rmc.getAllocatedResource()).thenReturn(res);
         when(rmc.getContainer()).thenReturn(c);
         when(rmc.getApplicationAttemptId()).thenReturn(attemptId);
         when(rmc.getQueueName()).thenReturn(queueName);
-        final ContainerId cId = ContainerId.newContainerId(attemptId, containerId);
-        when(rmc.getContainerId()).thenReturn(
-            cId);
+        final ContainerId cId = ContainerId.newContainerId(attemptId,
+            containerId);
+        when(rmc.getContainerId()).thenReturn(cId);
         doAnswer(new Answer<Integer>() {
           @Override
           public Integer answer(InvocationOnMock invocation) throws Throwable {
-            return cId.compareTo(((RMContainer) invocation.getArguments()[0])
-                .getContainerId());
+            return cId.compareTo(
+                ((RMContainer) invocation.getArguments()[0]).getContainerId());
           }
         }).when(rmc).compareTo(any(RMContainer.class));
 
         if (containerId == 1) {
           when(rmc.isAMContainer()).thenReturn(true);
+          when(app.getAMResource(label)).thenReturn(res);
+          when(app.getAppAMNodePartitionName()).thenReturn(label);
         }
 
         if (reserved) {
@@ -239,24 +264,49 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
 
         // If this is a non-exclusive allocation
         String partition = null;
-        if (exp.isEmpty()
+        if (label.isEmpty()
             && !(partition = nodeIdToSchedulerNodes.get(host).getPartition())
-            .isEmpty()) {
+                .isEmpty()) {
           LeafQueue queue = (LeafQueue) nameToCSQueues.get(queueName);
-          Map<String, TreeSet<RMContainer>> ignoreExclusivityContainers =
-              queue.getIgnoreExclusivityRMContainers();
+          Map<String, TreeSet<RMContainer>> ignoreExclusivityContainers = queue
+              .getIgnoreExclusivityRMContainers();
           if (!ignoreExclusivityContainers.containsKey(partition)) {
             ignoreExclusivityContainers.put(partition,
                 new TreeSet<RMContainer>());
           }
           ignoreExclusivityContainers.get(partition).add(rmc);
         }
-        LOG.debug("add container to app=" + attemptId + " res=" + res
-            + " node=" + host + " nodeLabelExpression=" + exp + " partition="
+        LOG.debug("add container to app=" + attemptId + " res=" + res + " node="
+            + host + " nodeLabelExpression=" + label + " partition="
             + partition);
 
         containerId++;
       }
+
+      // If app has 0 container, and it has only pending, still make sure to
+      // update label.
+      if (repeat == 0) {
+        when(app.getAppAMNodePartitionName()).thenReturn(label);
+      }
+
+      // Some more app specific aggregated data can be better filled here.
+      when(app.getPriority()).thenReturn(pri);
+      when(app.getUser()).thenReturn(userName);
+      when(app.getCurrentConsumption()).thenReturn(used);
+      when(app.getCurrentReservation())
+          .thenReturn(Resources.createResource(0, 0));
+
+      Map<String, Resource> pendingForDefaultPartition =
+          new HashMap<String, Resource>();
+      // Add for default partition for now.
+      pendingForDefaultPartition.put(label, pending);
+      when(app.getTotalPendingRequestsPerPartition())
+          .thenReturn(pendingForDefaultPartition);
+
+      // need to set pending resource in resource usage as well
+      ResourceUsage ru = new ResourceUsage();
+      ru.setUsed(label, used);
+      when(app.getAppAttemptResourceUsage()).thenReturn(ru);
 
       start = end + 1;
     }
@@ -273,31 +323,113 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
    */
   private void mockApplications(String appsConfig) {
     int id = 1;
+    HashMap<String, HashSet<String>> userMap = new HashMap<String, HashSet<String>>();
+    HashMap<String, HashMap<String, HashMap<String, ResourceUsage>>> userResourceUsagePerLabel = new HashMap<>();
+    LeafQueue queue = null;
+    int mulp = -1;
     for (String a : appsConfig.split(";")) {
       String[] strs = a.split("\t");
       String queueName = strs[0];
+      if (mulp <= 0 && strs.length > 2 && strs[2] != null) {
+        mulp = 100 / (new Integer(strs[2]).intValue());
+      }
 
       // get containers
       List<RMContainer> liveContainers = new ArrayList<RMContainer>();
       List<RMContainer> reservedContainers = new ArrayList<RMContainer>();
       ApplicationId appId = ApplicationId.newInstance(0L, id);
-      ApplicationAttemptId appAttemptId = ApplicationAttemptId.newInstance(appId, 1);
-
-      mockContainers(strs[1], appAttemptId, queueName, reservedContainers,
-          liveContainers);
+      ApplicationAttemptId appAttemptId = ApplicationAttemptId
+          .newInstance(appId, 1);
 
       FiCaSchedulerApp app = mock(FiCaSchedulerApp.class);
+      when(app.getAMResource(anyString()))
+          .thenReturn(Resources.createResource(0, 0));
+      mockContainers(strs[1], app, appAttemptId, queueName, reservedContainers,
+          liveContainers);
+      LOG.debug("Application mock: queue: " + queueName + ", appId:" + appId);
+
       when(app.getLiveContainers()).thenReturn(liveContainers);
       when(app.getReservedContainers()).thenReturn(reservedContainers);
       when(app.getApplicationAttemptId()).thenReturn(appAttemptId);
       when(app.getApplicationId()).thenReturn(appId);
-      when(app.getPriority()).thenReturn(Priority.newInstance(0));
+      when(app.getQueueName()).thenReturn(queueName);
 
       // add to LeafQueue
-      LeafQueue queue = (LeafQueue) nameToCSQueues.get(queueName);
+      queue = (LeafQueue) nameToCSQueues.get(queueName);
       queue.getApplications().add(app);
+      queue.getAllApplications().add(app);
 
+      HashSet<String> users = userMap.get(queueName);
+      if (null == users) {
+        users = new HashSet<String>();
+        userMap.put(queueName, users);
+      }
+      users.add(app.getUser());
+
+      String label = app.getAppAMNodePartitionName();
+
+      // Get label to queue
+      HashMap<String, HashMap<String, ResourceUsage>> userResourceUsagePerQueue = userResourceUsagePerLabel
+          .get(label);
+      if (null == userResourceUsagePerQueue) {
+        userResourceUsagePerQueue = new HashMap<>();
+        userResourceUsagePerLabel.put(label, userResourceUsagePerQueue);
+      }
+
+      // Get queue to user based resource map
+      HashMap<String, ResourceUsage> userResourceUsage = userResourceUsagePerQueue
+          .get(queueName);
+      if (null == userResourceUsage) {
+        userResourceUsage = new HashMap<>();
+        userResourceUsagePerQueue.put(queueName, userResourceUsage);
+      }
+
+      // Get user to its resource usage.
+      ResourceUsage usage = userResourceUsage.get(app.getUser());
+      if (null == usage) {
+        usage = new ResourceUsage();
+        userResourceUsage.put(app.getUser(), usage);
+      }
+
+      usage.incAMUsed(app.getAMResource(label));
+      usage.incUsed(app.getAppAttemptResourceUsage().getUsed(label));
       id++;
+    }
+
+    for (String label : userResourceUsagePerLabel.keySet()) {
+      for (String queueName : userMap.keySet()) {
+        queue = (LeafQueue) nameToCSQueues.get(queueName);
+        // Currently we have user-limit test support only for default label.
+        Resource totResoucePerPartition = partitionToResource.get("");
+        Resource capacity = Resources.multiply(totResoucePerPartition,
+            queue.getQueueCapacities().getAbsoluteCapacity());
+        HashSet<String> users = userMap.get(queue.getQueueName());
+        when(queue.getAllUsers()).thenReturn(users);
+        Resource userLimit;
+        if (mulp > 0) {
+          userLimit = Resources.divideAndCeil(rc, capacity, mulp);
+        } else {
+          userLimit = Resources.divideAndCeil(rc, capacity,
+              users.size());
+        }
+        LOG.debug("Updating user-limit from mock: totResoucePerPartition="
+            + totResoucePerPartition + ", capacity=" + capacity
+            + ", users.size()=" + users.size() + ", userlimit= " + userLimit
+            + ",label= " + label + ",queueName= " + queueName);
+
+        HashMap<String, ResourceUsage> userResourceUsage = userResourceUsagePerLabel
+            .get(label).get(queueName);
+        for (String userName : users) {
+          User user = new User(userName);
+          if (userResourceUsage != null) {
+            user.setResourceUsage(userResourceUsage.get(userName));
+          }
+          when(queue.getUser(eq(userName))).thenReturn(user);
+          when(queue.getResourceLimitForAllUsers(eq(userName),
+              any(Resource.class), anyString(), any(SchedulingMode.class)))
+                  .thenReturn(userLimit);
+        }
+      }
     }
   }
 
@@ -411,6 +543,14 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
    * -B...
    * </pre>
    * ";" splits queues, and there should no empty lines, no extra spaces
+   *
+   * For each queue, it has configurations to specify capacities (to each
+   * partition), format is:
+   * <pre>
+   * -<queueName> (<labelName1>=[guaranteed max used pending], \
+   *               <labelName2>=[guaranteed max used pending])
+   *              {key1=value1,key2=value2};  // Additional configs
+   * </pre>
    */
   @SuppressWarnings({ "unchecked", "rawtypes" })
   private ParentQueue mockQueueHierarchy(String queueExprs) {
@@ -426,16 +566,28 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
         queue = parentQueue;
         List<CSQueue> children = new ArrayList<CSQueue>();
         when(parentQueue.getChildQueues()).thenReturn(children);
+        QueueOrderingPolicy policy = mock(QueueOrderingPolicy.class);
+        when(policy.getConfigName()).thenReturn(
+            CapacitySchedulerConfiguration.QUEUE_PRIORITY_UTILIZATION_ORDERING_POLICY);
+        when(parentQueue.getQueueOrderingPolicy()).thenReturn(policy);
       } else {
         LeafQueue leafQueue = mock(LeafQueue.class);
         final TreeSet<FiCaSchedulerApp> apps = new TreeSet<>(
             new Comparator<FiCaSchedulerApp>() {
               @Override
               public int compare(FiCaSchedulerApp a1, FiCaSchedulerApp a2) {
-                return a1.getApplicationId().compareTo(a2.getApplicationId());
+                if (a1.getPriority() != null
+                    && !a1.getPriority().equals(a2.getPriority())) {
+                  return a1.getPriority().compareTo(a2.getPriority());
+                }
+
+                int res = a1.getApplicationId()
+                    .compareTo(a2.getApplicationId());
+                return res;
               }
             });
         when(leafQueue.getApplications()).thenReturn(apps);
+        when(leafQueue.getAllApplications()).thenReturn(apps);
         OrderingPolicy<FiCaSchedulerApp> so = mock(OrderingPolicy.class);
         when(so.getPreemptionIterator()).thenAnswer(new Answer() {
           public Object answer(InvocationOnMock invocation) {
@@ -451,6 +603,8 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
         queue = leafQueue;
       }
 
+      ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+      when(queue.getReadLock()).thenReturn(lock.readLock());
       setupQueue(queue, q, queueExprArray, idx);
       if (queue.getQueueName().equals(ROOT)) {
         rootQueue = (ParentQueue) queue;
@@ -514,24 +668,32 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
       float absUsed = Resources.divide(rc, totResoucePerPartition,
           parseResourceFromString(values[2].trim()), totResoucePerPartition)
           + epsilon;
+      float used = Resources.divide(rc, totResoucePerPartition,
+          parseResourceFromString(values[2].trim()),
+          parseResourceFromString(values[0].trim())) + epsilon;
       Resource pending = parseResourceFromString(values[3].trim());
       qc.setAbsoluteCapacity(partitionName, absGuaranteed);
       qc.setAbsoluteMaximumCapacity(partitionName, absMax);
       qc.setAbsoluteUsedCapacity(partitionName, absUsed);
+      qc.setUsedCapacity(partitionName, used);
+      when(queue.getUsedCapacity()).thenReturn(used);
       ru.setPending(partitionName, pending);
-      if (!isParent(queueExprArray, idx)) {
-        LeafQueue lq = (LeafQueue) queue;
-        when(lq.getTotalPendingResourcesConsideringUserLimit(isA(Resource.class),
-            isA(String.class))).thenReturn(pending);
-      }
-      ru.setUsed(partitionName, parseResourceFromString(values[2].trim()));
-
       // Setup reserved resource if it contained by input config
       Resource reserved = Resources.none();
       if(values.length == 5) {
         reserved = parseResourceFromString(values[4].trim());
         ru.setReserved(partitionName, reserved);
       }
+      if (!isParent(queueExprArray, idx)) {
+        LeafQueue lq = (LeafQueue) queue;
+        when(lq.getTotalPendingResourcesConsideringUserLimit(isA(Resource.class),
+            isA(String.class), eq(false))).thenReturn(pending);
+        when(lq.getTotalPendingResourcesConsideringUserLimit(isA(Resource.class),
+            isA(String.class), eq(true))).thenReturn(
+            Resources.subtract(pending, reserved));
+      }
+      ru.setUsed(partitionName, parseResourceFromString(values[2].trim()));
+
       LOG.debug("Setup queue=" + queueName + " partition=" + partitionName
           + " [abs_guaranteed=" + absGuaranteed + ",abs_max=" + absMax
           + ",abs_used" + absUsed + ",pending_resource=" + pending
@@ -542,8 +704,54 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
     when(queue.getPreemptionDisabled()).thenReturn(
         conf.getPreemptionDisabled(queuePath, false));
 
+    // Setup other queue configurations
+    Map<String, String> otherConfigs = getOtherConfigurations(
+        queueExprArray[idx]);
+    if (otherConfigs.containsKey("priority")) {
+      when(queue.getPriority()).thenReturn(
+          Priority.newInstance(Integer.valueOf(otherConfigs.get("priority"))));
+    } else {
+      // set queue's priority to 0 by default
+      when(queue.getPriority()).thenReturn(Priority.newInstance(0));
+    }
+
+    // Setup disable preemption of queues
+    if (otherConfigs.containsKey("disable_preemption")) {
+      when(queue.getPreemptionDisabled()).thenReturn(
+          Boolean.valueOf(otherConfigs.get("disable_preemption")));
+    }
+
     nameToCSQueues.put(queueName, queue);
     when(cs.getQueue(eq(queueName))).thenReturn(queue);
+  }
+
+  /**
+   * Get additional queue's configurations
+   * @param queueExpr queue expr
+   * @return maps of configs
+   */
+  private Map<String, String> getOtherConfigurations(String queueExpr) {
+    if (queueExpr.contains("{")) {
+      int left = queueExpr.indexOf('{');
+      int right = queueExpr.indexOf('}');
+
+      if (right > left) {
+        Map<String, String> configs = new HashMap<>();
+
+        String subStr = queueExpr.substring(left + 1, right);
+        for (String kv : subStr.split(",")) {
+          if (kv.contains("=")) {
+            String key = kv.substring(0, kv.indexOf("="));
+            String value = kv.substring(kv.indexOf("=") + 1);
+            configs.put(key, value);
+          }
+        }
+
+        return configs;
+      }
+    }
+
+    return Collections.EMPTY_MAP;
   }
 
   /**
@@ -654,6 +862,10 @@ public class ProportionalCapacityPreemptionPolicyMockFramework {
   public void checkPendingResource(CSQueue queue, String partition, int pending) {
     ResourceUsage ru = queue.getQueueResourceUsage();
     Assert.assertEquals(pending, ru.getPending(partition).getMemorySize());
+  }
+
+  public void checkPriority(CSQueue queue, int expectedPriority) {
+    Assert.assertEquals(expectedPriority, queue.getPriority().getPriority());
   }
 
   public void checkReservedResource(CSQueue queue, String partition, int reserved) {

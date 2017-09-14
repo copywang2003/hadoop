@@ -21,9 +21,6 @@ package org.apache.hadoop.fs;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.http.lib.StaticUserWebFilter;
-import org.apache.hadoop.io.erasurecode.rawcoder.RSRawErasureCoderFactory;
-import org.apache.hadoop.io.erasurecode.rawcoder.RSRawErasureCoderFactoryLegacy;
-import org.apache.hadoop.io.erasurecode.rawcoder.XORRawErasureCoderFactory;
 
 /** 
  * This class contains constants for configuration keys used
@@ -78,11 +75,19 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   /** Default value for IPC_SERVER_RPC_READ_CONNECTION_QUEUE_SIZE */
   public static final int IPC_SERVER_RPC_READ_CONNECTION_QUEUE_SIZE_DEFAULT =
       100;
-      
+
+  /** Max request size a server will accept. */
   public static final String IPC_MAXIMUM_DATA_LENGTH =
       "ipc.maximum.data.length";
-  
+  /** Default value for IPC_MAXIMUM_DATA_LENGTH. */
   public static final int IPC_MAXIMUM_DATA_LENGTH_DEFAULT = 64 * 1024 * 1024;
+
+  /** Max response size a client will accept. */
+  public static final String IPC_MAXIMUM_RESPONSE_LENGTH =
+      "ipc.maximum.response.length";
+  /** Default value for IPC_MAXIMUM_RESPONSE_LENGTH. */
+  public static final int IPC_MAXIMUM_RESPONSE_LENGTH_DEFAULT =
+      128 * 1024 * 1024;
 
   /** How many calls per handler are allowed in the queue. */
   public static final String  IPC_SERVER_HANDLER_QUEUE_SIZE_KEY =
@@ -136,6 +141,22 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final int IO_COMPRESSION_CODEC_SNAPPY_BUFFERSIZE_DEFAULT =
       256 * 1024;
 
+  /** ZStandard compression level. */
+  public static final String IO_COMPRESSION_CODEC_ZSTD_LEVEL_KEY =
+      "io.compression.codec.zstd.level";
+
+  /** Default value for IO_COMPRESSION_CODEC_ZSTD_LEVEL_KEY. */
+  public static final int IO_COMPRESSION_CODEC_ZSTD_LEVEL_DEFAULT = 3;
+
+  /** ZStandard buffer size. */
+  public static final String IO_COMPRESSION_CODEC_ZSTD_BUFFER_SIZE_KEY =
+      "io.compression.codec.zstd.buffersize";
+
+  /** ZStandard buffer size a value of 0 means use the recommended zstd
+   * buffer size that the library recommends. */
+  public static final int
+      IO_COMPRESSION_CODEC_ZSTD_BUFFER_SIZE_DEFAULT = 0;
+
   /** Internal buffer size for Lz4 compressor/decompressors */
   public static final String IO_COMPRESSION_CODEC_LZ4_BUFFERSIZE_KEY =
       "io.compression.codec.lz4.buffersize";
@@ -152,30 +173,7 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final boolean IO_COMPRESSION_CODEC_LZ4_USELZ4HC_DEFAULT =
       false;
 
-  /**
-   * Erasure Coding configuration family
-   */
 
-  /** Supported erasure codec classes */
-  public static final String IO_ERASURECODE_CODECS_KEY = "io.erasurecode.codecs";
-
-  /** Raw coder factory for the RS default codec. */
-  public static final String IO_ERASURECODE_CODEC_RS_DEFAULT_RAWCODER_KEY =
-      "io.erasurecode.codec.rs-default.rawcoder";
-  public static final String IO_ERASURECODE_CODEC_RS_DEFAULT_RAWCODER_DEFAULT =
-      RSRawErasureCoderFactory.class.getCanonicalName();
-
-  /** Raw coder factory for the RS legacy codec. */
-  public static final String IO_ERASURECODE_CODEC_RS_LEGACY_RAWCODER_KEY =
-      "io.erasurecode.codec.rs-legacy.rawcoder";
-  public static final String IO_ERASURECODE_CODEC_RS_LEGACY_RAWCODER_DEFAULT =
-      RSRawErasureCoderFactoryLegacy.class.getCanonicalName();
-
-  /** Raw coder factory for the XOR codec. */
-  public static final String IO_ERASURECODE_CODEC_XOR_RAWCODER_KEY =
-      "io.erasurecode.codec.xor.rawcoder";
-  public static final String IO_ERASURECODE_CODEC_XOR_RAWCODER_DEFAULT =
-      XORRawErasureCoderFactory.class.getCanonicalName();
 
   /**
    * Service Authorization
@@ -231,12 +229,20 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final boolean HADOOP_SECURITY_TOKEN_SERVICE_USE_IP_DEFAULT =
       true;
 
-  /** See <a href="{@docRoot}/../core-default.html">core-default.xml .</a> */
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
   public static final String HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_ENABLED_KEY =
       "hadoop.security.dns.log-slow-lookups.enabled";
   public static final boolean
       HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_ENABLED_DEFAULT = false;
-  /** See <a href="{@docRoot}/../core-default.html">core-default.xml .</a> */
+  /**
+   * @see
+   * <a href="{@docRoot}/../hadoop-project-dist/hadoop-common/core-default.xml">
+   * core-default.xml</a>
+   */
   public static final String
       HADOOP_SECURITY_DNS_LOG_SLOW_LOOKUPS_THRESHOLD_MS_KEY =
       "hadoop.security.dns.log-slow-lookups.threshold.ms";
@@ -347,6 +353,17 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
   public static final String HADOOP_USER_GROUP_METRICS_PERCENTILES_INTERVALS =
     "hadoop.user.group.metrics.percentiles.intervals";
 
+  /* When creating UGI with UserGroupInformation(Subject), treat the passed
+   * subject external if set to true, and assume the owner of the subject
+   * should do the credential renewal.
+   *
+   * This is a temporary config to solve the compatibility issue with
+   * HADOOP-13558 and HADOOP-13805 fix, see the jiras for discussions.
+   */
+  public static final String HADOOP_TREAT_SUBJECT_EXTERNAL_KEY =
+      "hadoop.treat.subject.external";
+  public static final boolean HADOOP_TREAT_SUBJECT_EXTERNAL_DEFAULT = false;
+
   public static final String RPC_METRICS_QUANTILE_ENABLE =
       "rpc.metrics.quantile.enable";
   public static final boolean RPC_METRICS_QUANTILE_ENABLE_DEFAULT = false;
@@ -360,4 +377,25 @@ public class CommonConfigurationKeys extends CommonConfigurationKeysPublic {
 
   // HDFS client HTrace configuration.
   public static final String  FS_CLIENT_HTRACE_PREFIX = "fs.client.htrace.";
+
+  // Global ZooKeeper configuration keys
+  public static final String ZK_PREFIX = "hadoop.zk.";
+  /** ACL for the ZooKeeper ensemble. */
+  public static final String ZK_ACL = ZK_PREFIX + "acl";
+  public static final String ZK_ACL_DEFAULT = "world:anyone:rwcda";
+  /** Authentication for the ZooKeeper ensemble. */
+  public static final String ZK_AUTH = ZK_PREFIX + "auth";
+
+  /** Address of the ZooKeeper ensemble. */
+  public static final String ZK_ADDRESS = ZK_PREFIX + "address";
+  /** Maximum number of retries for a ZooKeeper operation. */
+  public static final String ZK_NUM_RETRIES = ZK_PREFIX + "num-retries";
+  public static final int    ZK_NUM_RETRIES_DEFAULT = 1000;
+  /** Timeout for a ZooKeeper operation in ZooKeeper in milliseconds. */
+  public static final String ZK_TIMEOUT_MS = ZK_PREFIX + "timeout-ms";
+  public static final int    ZK_TIMEOUT_MS_DEFAULT = 10000;
+  /** How often to retry a ZooKeeper operation  in milliseconds. */
+  public static final String ZK_RETRY_INTERVAL_MS =
+      ZK_PREFIX + "retry-interval-ms";
+  public static final int    ZK_RETRY_INTERVAL_MS_DEFAULT = 1000;
 }
